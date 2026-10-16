@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 
 from src.backend.constants import UPLOAD_DIR
-from src.backend.api.errors import ApiError
 
 MAX_MULTIPART_HEADER_BYTES = 16 * 1024
 
@@ -123,6 +122,8 @@ def validate_file_name(file_name: str) -> str:
     unsupported extensions with 415. Do not compare file contents or check duplicates
     here. Names stay case-sensitive; parsing actual file contents happens during indexing.
     """
+    from src.backend.api.errors import ApiError
+
     has_directory_or_control_characters = any(
         character in "/\\" or ord(character) < 32 or ord(character) == 127
         for character in file_name

@@ -82,6 +82,8 @@ class DocumentResponse(BaseModel):
     client_file_id matches the file shown in the composer and may be None for old
     records. file_size is in bytes. status reports processing; deleted reports
     whether the file was removed while keeping its reference in message history.
+    error contains a safe processing error when indexing fails. chunk_count is
+    the number of text chunks stored by the successful indexing attempt.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -93,6 +95,8 @@ class DocumentResponse(BaseModel):
     file_size: int
     status: str
     deleted: bool = False
+    error: dict | None = None
+    chunk_count: int = 0
 
 
 class MessageResponse(BaseModel):
@@ -200,3 +204,4 @@ class SubmissionResponse(BaseModel):
     run_id: UUID
     status: str
     documents: list[DocumentResponse]
+    error: dict | None = None

@@ -163,5 +163,5 @@ class AttachmentSchemaTests(unittest.TestCase):
             upgrade_database(connection)
             self.assertEqual(
                 connection.scalar(select(Attachment.status).where(Attachment.id == legacy_id)),
-                "ready",
+                "pending",
             )

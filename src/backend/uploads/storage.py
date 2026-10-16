@@ -35,11 +35,20 @@ async def run_file_operation(
     Errors from the operation propagate to the caller.
     """
     pending_operation = asyncio.create_task(run_in_threadpool(operation, *arguments))
-    try:
-        return await asyncio.shield(pending_operation)
-    except asyncio.CancelledError:
-        await pending_operation
-        raise
+    cancellation_requested = False
+    while True:
+        try:
+            operation_result = await asyncio.shield(pending_operation)
+            break
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            if pending_operation.cancelled():
+                raise
+            # Shutdown can cancel the caller more than once. Keep shielding the
+            # same native write so file locks/cleanup cannot race the worker thread.
+    if cancellation_requested:
+        raise asyncio.CancelledError
+    return operation_result
 
 
 @dataclass

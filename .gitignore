@@ -131,6 +131,7 @@ tests/
 !src/backend/database/tests/
 !src/backend/api/tests/
 !src/backend/execution/tests/
+!src/backend/indexing/tests/
 
 *.gguf
 

@@ -5,8 +5,6 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 UPLOAD_DIR = PROJECT_ROOT / '.uploads'
 
-ATTACHMENT_UPLOAD_DIR = UPLOAD_DIR / 'files'
-
 VECTOR_DB_PERSIST_DIR = UPLOAD_DIR / 'chroma'
 
 

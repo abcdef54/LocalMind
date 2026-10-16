@@ -852,6 +852,17 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - File sau acceptance ở pending, submission accepted, run pending; text-only có submission ready/run queued. Chưa parse/embed hoặc gọi AI: BE-08/BE-10 thực hiện các bước này; frontend cũ vẫn dùng API cũ.
 - Hướng dẫn contract, limits, cleanup và migration: `src/backend/uploads/README.md`. Tổng 100 tests pass: 53 API/stream, 26 migration/schema, 21 executor/config/lifespan, dùng PostgreSQL 15 tạm; không migrate DB app hoặc gọi model/GPU.
 
+### BE-08 — Background indexing và scoped RAG: hoàn thành (2026-10-16)
+
+- Worker đọc file pending, parse trong subprocess có timeout/giới hạn tài nguyên, chia chunk và embed theo batch trên CPU. Giới hạn concurrency bằng PostgreSQL; không giữ transaction trong lúc parse/embed.
+- Chỉ chuyển submission sang ready và run sang queued khi tất cả file đã ready. File lỗi làm submission/run failed; POST `/api/v1/conversations/{conversation_id}/submissions/{submission_id}/retry-indexing` thử lại file lỗi, giữ nguyên IDs và file đã ready.
+- Mỗi lượt indexing có generation riêng. Chỉ generation đã commit ready được retrieval; partial writes, worker cũ, file deleted và conversation archived không được sử dụng. Lease hết có thể rebuild; file lock giữ an toàn khi native IO cũ chưa dừng.
+- RAG bắt buộc filter conversation và danh sách file ready từ DB; kiểm tra lại sau search để loại file vừa bị xóa/thay generation. Model không tự chọn conversation để truy xuất.
+- Migration `0005_attachment_indexing` đưa tài liệu cũ về pending để xây collection mới; giữ file, messages và citations. Run đã hoàn thành không chạy lại khi reindex.
+- Theo quyết định overhaul, thay implementation vector DB cũ, bỏ upload router/service cũ và DELETE conversation legacy đã được API v1 thay thế. Frontend cũ cần chuyển sang submission API; không giữ hai luồng upload song song.
+- Tách `get_vector_embedding_model()` (model MiniLM CPU) và `get_document_vector_index()` (Chroma dùng model đó). Production AI handler của submission vẫn thuộc BE-10; BE-08 không tạo câu trả lời giả.
+- 129 tests pass (53 API/stream, 28 migration/schema, 21 executor/config/lifespan, 27 indexing/tools/parser). Kiểm thử dùng PostgreSQL 15 tạm, Chroma thật và embeddings giả xác định; không tải model, gọi GPU hoặc thay đổi DB app. Chi tiết giới hạn, retry và recovery: `src/backend/indexing/README.md`.
+
 ## 18. Implementation Tasks
 
 | Task | Phạm vi thực hiện | Tiêu chí hoàn thành |

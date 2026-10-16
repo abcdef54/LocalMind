@@ -2,6 +2,7 @@ import asyncio
 import random
 import re
 import time
+from uuid import UUID
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, AIMessage
@@ -9,7 +10,7 @@ from langchain_core.messages import ToolMessage
 from src.backend.ai.langgraph.graph_states import AgentState, Candidate
 from src.backend.ai.langgraph.graph_configs import get_config, MAX_RANK_GROUP
 from src.backend.ai.langgraph.graph_utils import get_llm, _seeded, _sample_idx, _log_token_usage
-from src.backend.ai.langchain.tools import retrieve_context, fetch_web_page, tavily_search
+from src.backend.ai.langchain.tools import create_retrieval_tool, fetch_web_page, tavily_search
 
 
 def setup(state: AgentState, config: RunnableConfig) -> dict:
@@ -26,9 +27,20 @@ def setup(state: AgentState, config: RunnableConfig) -> dict:
         "pool": [],
     }
 
+
 async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> tuple[list, list]:
-    """Runs a tool-calling loop for a single candidate generation.
-    Returns (messages_produced, citations_extracted)."""
+    """Generate one candidate using validated LangChain tool calls and scoped retrieval.
+
+    Args:
+        llm: Candidate's model client, optionally bound to the supplied tools.
+        messages: Conversation context copied before adding generated/tool messages.
+        tools_map: Server-built tool instances; retrieve_context must already be
+            bound to the chat, so model arguments cannot select another conversation.
+
+    Returns:
+        Produced messages and unique cited file IDs after at most five model rounds.
+        ToolMessage artifacts are preserved instead of bypassing tool validation.
+    """
     bound_llm = llm.bind_tools(list(tools_map.values())) if tools_map else llm
     current_messages = list(messages)
     messages_produced = []
@@ -53,40 +65,29 @@ async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> t
                 err_msg = ToolMessage(
                     content=f"Error: Tool '{tool_name}' not found.",
                     tool_call_id=tool_id,
-                    name=tool_name
+                    name=tool_name,
                 )
                 messages_produced.append(err_msg)
                 current_messages.append(err_msg)
                 continue
 
             try:
-                print(f"[Graph Tool Exec] Invoking {tool_name} with {tool_args}")
-                if hasattr(tool_fn, "coroutine") and tool_fn.coroutine:
-                    tool_output = await tool_fn.coroutine(**tool_args)
-                else:
-                    tool_output = await tool_fn.ainvoke(tool_args)
-
-                if isinstance(tool_output, tuple) and len(tool_output) == 2:
-                    content, artifact = tool_output
-                    if artifact and isinstance(artifact, dict) and "source_file_ids" in artifact:
-                        citations_extracted.extend(artifact["source_file_ids"])
-                else:
-                    content = str(tool_output)
-                    artifact = None
-
-                tool_msg = ToolMessage(
-                    content=content,
-                    artifact=artifact,
-                    tool_call_id=tool_id,
-                    name=tool_name
+                tool_msg = await tool_fn.ainvoke(
+                    {
+                        "type": "tool_call",
+                        "id": tool_id,
+                        "name": tool_name,
+                        "args": tool_args,
+                    }
                 )
+                artifact = tool_msg.artifact
+                if artifact and isinstance(artifact, dict):
+                    citations_extracted.extend(artifact.get("source_file_ids", []))
                 messages_produced.append(tool_msg)
                 current_messages.append(tool_msg)
             except Exception as e:
                 err_msg = ToolMessage(
-                    content=f"Error executing tool: {str(e)}",
-                    tool_call_id=tool_id,
-                    name=tool_name
+                    content=f"Error executing tool: {str(e)}", tool_call_id=tool_id, name=tool_name
                 )
                 messages_produced.append(err_msg)
                 current_messages.append(err_msg)
@@ -103,15 +104,18 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
     llm = get_llm(config)  # plain client; temperature from config (0.0 for low, >0 for wider modes)
 
     idx = _sample_idx(state, config)
-    print(f"\n[IDX {idx}] ==================== Generate Node (Self-Consistency) ====================\n")
+    print(
+        f"\n[IDX {idx}] ==================== Generate Node (Self-Consistency) ====================\n"
+    )
     print(f"[IDX {idx}] Question: {state['user_query']}")
     print(f"[IDX {idx}] Width (N samples): {width}")
 
     cfg = config["configurable"]
     tools_enabled = cfg.get("tools_enabled", True)
     if tools_enabled:
+        conversation_id = UUID(str(cfg["conversation_id"]))
         tools_map = {
-            "retrieve_context": retrieve_context,
+            "retrieve_context": create_retrieval_tool(conversation_id),
             "fetch_web_page": fetch_web_page,
             "tavily_search": tavily_search,
         }
@@ -120,7 +124,9 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
 
     # Run the generator with tools in parallel for width
     tasks = [
-        _generate_sample_with_tools(_seeded(llm, random.randint(0, 2**31 - 1)), state["messages"], tools_map)
+        _generate_sample_with_tools(
+            _seeded(llm, random.randint(0, 2**31 - 1)), state["messages"], tools_map
+        )
         for _ in range(width)
     ]
     results = await asyncio.gather(*tasks)
@@ -131,20 +137,27 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
     )
     for i, (messages_produced, citations) in enumerate(results):
         final_msg = messages_produced[-1]
-        content = final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
-        pool.append(Candidate(
-            answer=content,
-            messages=messages_produced,
-            citations=citations
-        ))
+        content = (
+            final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
+        )
+        pool.append(Candidate(answer=content, messages=messages_produced, citations=citations))
         print(f"[IDX {idx}] Sample {i}: id={pool[-1].id[:8]}")
         # TEMPORARY token-usage debug (one block per generation call)
-        _log_token_usage(idx, "Generate Call", msg=final_msg, prompt_text=_gen_prompt_text, completion_text=content)
-    print(f"\n[IDX {idx}] ==========================================================================\n")
+        _log_token_usage(
+            idx,
+            "Generate Call",
+            msg=final_msg,
+            prompt_text=_gen_prompt_text,
+            completion_text=content,
+        )
+    print(
+        f"\n[IDX {idx}] ==========================================================================\n"
+    )
 
     return {
         "pool": pool,
     }
+
 
 # ───────────────────── One-shot ranking selector ─────────────────────
 # A DOMAIN-GENERAL selector. Unlike majority vote — which can only tally when candidates share a
@@ -152,6 +165,7 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
 # summarization, code generation, RAG, research agents, or essay generation — an LLM ranker compares
 # candidates on their merits and picks one with no equality assumption. GSM8K is used only because
 # its exact-match answers let us benchmark this ranker head-to-head against majority vote and Pass@N.
+
 
 def _candidate_labels(n: int) -> list[str]:
     """Stable A, B, C, … labels (benchmark widths 1..9 stay within A..I)."""
@@ -192,12 +206,12 @@ def _parse_letter_choice(text: Optional[str], labels: list[str]) -> Optional[str
         return None
     label_set = set(labels)
     up = text.strip().upper()
-    if up in label_set:                       # exact single-letter reply
+    if up in label_set:  # exact single-letter reply
         return up
-    m = re.search(r"\b([A-Z])\b", up)         # first standalone letter token
+    m = re.search(r"\b([A-Z])\b", up)  # first standalone letter token
     if m and m.group(1) in label_set:
         return m.group(1)
-    for ch in up:                             # first valid label char in reading order
+    for ch in up:  # first valid label char in reading order
         if ch in label_set:
             return ch
     return None
@@ -215,7 +229,7 @@ async def rank_no_reasoning(
     label_to_cand = dict(zip(labels, candidates))
     prompt = _no_reasoning_prompt(user_query, candidates, labels)
 
-    resp = await llm.bind(max_tokens=16).ainvoke([HumanMessage(content=prompt)])   # exactly ONE call
+    resp = await llm.bind(max_tokens=16).ainvoke([HumanMessage(content=prompt)])  # exactly ONE call
     text = resp.content if isinstance(resp.content, str) else str(resp.content)
     # TEMPORARY token-usage debug
     _log_token_usage(idx, "Rank Call", msg=resp, prompt_text=prompt, completion_text=text)
@@ -223,7 +237,9 @@ async def rank_no_reasoning(
     label = _parse_letter_choice(text, labels)
     parse_failed = label is None
     if parse_failed:
-        print(f"[IDX {idx}] [rank_no_reasoning] unparseable response {text!r}; falling back to candidate {labels[0]}")
+        print(
+            f"[IDX {idx}] [rank_no_reasoning] unparseable response {text!r}; falling back to candidate {labels[0]}"
+        )
         label = labels[0]
     return label_to_cand[label], 1, parse_failed
 
@@ -233,6 +249,7 @@ async def rank_no_reasoning(
 # regeneration, NO verifier/critic, NO abstention, NO extra generation round — the generator above is
 # untouched and ONLY the selector changes. Rather than one N-way ranking call, run a balanced tournament
 # where every ranking call compares at most MAX_RANK_GROUP (=3) candidates.
+
 
 def _tournament_groups(candidates: list["Candidate"]) -> list[list[Candidate]]:
     """One round's bracket split — the MINIMUM-rank-call rule. Rank floor(n/3) full
@@ -247,9 +264,9 @@ def _tournament_groups(candidates: list["Candidate"]) -> list[list[Candidate]]:
     the ranked groups vs. take byes is random; the A/B/C… labels are display-only (input order)."""
     n = len(candidates)
     if n <= MAX_RANK_GROUP:
-        return [list(candidates)]                         # final group, ranked in one call
-    full = (n // MAX_RANK_GROUP) * MAX_RANK_GROUP          # candidates that fill complete size-3 groups
-    groups = [list(candidates[i:i + MAX_RANK_GROUP]) for i in range(0, full, MAX_RANK_GROUP)]
+        return [list(candidates)]  # final group, ranked in one call
+    full = (n // MAX_RANK_GROUP) * MAX_RANK_GROUP  # candidates that fill complete size-3 groups
+    groups = [list(candidates[i : i + MAX_RANK_GROUP]) for i in range(0, full, MAX_RANK_GROUP)]
     groups.extend([candidates[j]] for j in range(full, n))  # trailing remainder -> singleton byes
     return groups
 
@@ -290,7 +307,7 @@ async def tournament_rank(
     def lbl(c: "Candidate") -> str:
         return labels.get(c.id, "?")
 
-    random.shuffle(survivors)   # randomize bracket seeding only; identity labels already fixed above
+    random.shuffle(survivors)  # randomize bracket seeding only; identity labels already fixed above
 
     print(f"\n[IDX {idx}] ================ Tournament Ranking ================\n")
 
@@ -318,7 +335,7 @@ async def tournament_rank(
             print(f"[IDX {idx}] Group {gi}:")
             if len(group) == 2:
                 print(f"[IDX {idx}] {lbl(group[0])} vs {lbl(group[1])}")
-            else:                                   # 3-way (MAX_RANK_GROUP); list vertically
+            else:  # 3-way (MAX_RANK_GROUP); list vertically
                 for c in group:
                     print(f"[IDX {idx}] {lbl(c)}")
 
@@ -355,10 +372,7 @@ async def tournament_select(state: AgentState, config: RunnableConfig) -> dict:
     user_query = state.get("user_query", "")
     idx = _sample_idx(state, config)
 
-    sampled_answers = [
-        c.answer
-        for c in pool
-    ]
+    sampled_answers = [c.answer for c in pool]
 
     print(f"\n[IDX {idx}] ============ Tournament-Select Node ============\n")
     print(f"[IDX {idx}] Rank mode: Tournament")
@@ -396,19 +410,20 @@ async def tournament_select(state: AgentState, config: RunnableConfig) -> dict:
         print(f"[IDX {idx}] Single candidate; no tournament needed.")
     else:
         cfg_copy = config.copy()
-        cfg_copy['rank_temperature'] = 0.0 # greedy ranker by default -> reproducible 
+        cfg_copy["rank_temperature"] = 0.0  # greedy ranker by default -> reproducible
         llm = get_llm(cfg_copy)
         t0 = time.perf_counter()
-        (winner, rank_calls, rank_parse_failed,
-         tournament_rounds, tournament_max_group_size) = await tournament_rank(
-            user_query, pool, llm, idx
+        winner, rank_calls, rank_parse_failed, tournament_rounds, tournament_max_group_size = (
+            await tournament_rank(user_query, pool, llm, idx)
         )
         rank_latency = time.perf_counter() - t0
 
     answer = winner.answer
 
     print(f"[IDX {idx}] Winner: id={winner.id[:8]}")
-    print(f"[IDX {idx}] Tournament rounds: {tournament_rounds} | rank calls: {rank_calls} | max group: {tournament_max_group_size}")
+    print(
+        f"[IDX {idx}] Tournament rounds: {tournament_rounds} | rank calls: {rank_calls} | max group: {tournament_max_group_size}"
+    )
     print(f"[IDX {idx}] Rank latency: {rank_latency:.3f}s")
     print(f"[IDX {idx}] Parse failed: {rank_parse_failed}")
     print(f"\n[IDX {idx}] ================================================================\n")

@@ -131,10 +131,16 @@ available at `/api/v1/openapi.json`; feature endpoints are added incrementally.
 
 The [durable run executor](src/backend/execution/README.md) documents PostgreSQL
 claims, leases, recovery and shutdown. Its AI handler is connected in the later
-LangGraph integration task; legacy chat behavior remains unchanged at this stage.
+LangGraph integration task. Legacy text chat now uses conversation-scoped document retrieval.
 
 The [submission upload guide](src/backend/uploads/README.md) describes multipart sends,
 filename duplicate checks, upload limits, storage cleanup and integration boundaries.
+
+The [indexing guide](src/backend/indexing/README.md) documents background parsing,
+embedding, retry, restart recovery and conversation-scoped retrieval. BE-08 removes
+the old `/uploads` endpoints and legacy chat deletion. The old frontend's upload
+and document controls require the planned v1 frontend integration; document APIs
+follow in BE-09 and submission-to-AI generation in BE-10.
 
 LocalMind has evolved through several major architectural generations.
 

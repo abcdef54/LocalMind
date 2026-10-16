@@ -208,6 +208,9 @@ class UploadStreamTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         await asyncio.sleep(0.01)
         self.assertFalse(task.done())
+        task.cancel()
+        await asyncio.sleep(0.01)
+        self.assertFalse(task.done())
         released.set()
         with self.assertRaises(asyncio.CancelledError):
             await task

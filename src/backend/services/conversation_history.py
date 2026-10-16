@@ -204,6 +204,8 @@ async def list_messages(
                     file_size=attachment.file_size,
                     status=attachment.status,
                     deleted=attachment.deleted_at is not None,
+                    error=attachment.error,
+                    chunk_count=attachment.chunk_count,
                 )
                 for attachment in message.attachments
             ],

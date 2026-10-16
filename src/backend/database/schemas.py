@@ -6,6 +6,7 @@ from pydantic import ConfigDict
 
 from typing import Optional
 
+
 class ChatRequest(BaseModel):
     conversation_id: UUID
     content: str
@@ -28,8 +29,6 @@ class ChatResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
 
 
-
-
 class ConversationCreate(BaseModel):
     user_id: Optional[str] = None
     title: str
@@ -42,15 +41,6 @@ class ConversationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-
-
-class AttachmentCreate(BaseModel):
-    file_name: str
-    file_type: str
-    file_size: int
-    created_at: datetime
-
-
 class AttachmentReponse(BaseModel):
     id: UUID
     file_name: str
@@ -58,14 +48,6 @@ class AttachmentReponse(BaseModel):
     file_size: int
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
-
-
-class FileInfo(BaseModel):
-    file_id: UUID
-    file_path: str
-    file_size: int
-    file_type: str
-    file_name: str
 
 
 class InstalledModelResponse(BaseModel):

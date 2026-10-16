@@ -3,85 +3,100 @@ import dotenv
 import httpx
 
 from bs4 import BeautifulSoup
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 from langchain_community.tools import TavilySearchResults
 from pydantic import BaseModel, Field
-from src.backend.ai.langchain.vector_db import LocalMindVectorDB
+import logging
+from uuid import UUID
+
+logger = logging.getLogger("uvicorn.error")
 
 dotenv.load_dotenv()
 
 
-
 class RetrieveContextInput(BaseModel):
-    query: str = Field(description="The search query to retrieve context for.")
-    k_returns: int = Field(default=3, description="Number of documents to return.")
+    """Accept search text/count only; conversation scope is supplied by the backend."""
 
-@tool(args_schema=RetrieveContextInput, response_format="content_and_artifact")
-async def retrieve_context(
-    query: str, 
-    k_returns: int = 5, 
-) -> tuple[str, dict]:
+    model_config = {"extra": "forbid"}
+    query: str = Field(
+        min_length=1, max_length=8000, description="Text to find in this chat's ready documents."
+    )
+    k_returns: int = Field(default=4, ge=1, le=20, description="Maximum relevant chunks to return.")
+
+
+def create_retrieval_tool(conversation_id: UUID) -> BaseTool:
+    """Bind document search to one server-selected conversation before exposing it to the model.
+
+    Args:
+        conversation_id: Chat UUID from the validated request/run context, never
+            from model-generated arguments. A missing/invalid scope is rejected.
+
+    Returns:
+        LangChain tool accepting only query/k_returns and returning context plus
+        citation IDs. Backend errors return a generic message, never an unscoped search.
+
+    Raises:
+        ValueError: If conversation_id is not a UUID.
     """
-    Queries your isolated personal knowledge documents (PDFs, Docx, Markdown) 
-    uploaded in this conversation to retrieve context needed to answer questions accurately.
-    """
-    print(f"\n[DEBUG retrieve_context] Starting context retrieval...")
-    print(f"  - query: '{query}'")
-    print(f"  - k_returns: {k_returns}")
+    if not isinstance(conversation_id, UUID):
+        raise ValueError("Document retrieval requires a conversation UUID")
 
-    vector_db = LocalMindVectorDB()
-    try:
-        candidate_k = max(k_returns * 4, 12)
-        print(f"[Tool: retrieve_context] Searching knowledge base for: '{query}' (candidates: {candidate_k})")
-        raw_docs = await vector_db.query(query, n_results=candidate_k)
-        
-        # Deduplicate candidates based on content text to eliminate identical chunks from multiple duplicate uploads
-        seen_content = set()
-        source_ids = []
-        retrieved_docs = []
-        for doc in raw_docs:
-            content_cleaned = doc.page_content.strip()
-            if content_cleaned not in seen_content:
-                seen_content.add(content_cleaned)
-                retrieved_docs.append(doc)
-                source_ids.append(doc.metadata.get('source_file_id', 'Unknown'))
-                
-                if len(retrieved_docs) >= k_returns:
-                    break
-        
-        print(f"[Tool: retrieve_context] Deduplicated down to {len(retrieved_docs)} distinct contextual chunks.")
-        
-        serialized_context = "\n\n".join(
-            f"Source: {os.path.basename(doc.metadata.get('source', 'Unknown'))}\nContent: {doc.page_content}"
-            for doc in retrieved_docs
-        )
+    @tool(
+        "retrieve_context", args_schema=RetrieveContextInput, response_format="content_and_artifact"
+    )
+    async def retrieve_context(query: str, k_returns: int = 4) -> tuple[str, dict]:
+        """Search ready documents uploaded in this conversation for relevant context.
 
-        artifact = {
-            "source_file_ids": source_ids,
-            "raw_documents": [
-                {"source": doc.metadata.get('source'), "content": doc.page_content} 
-                for doc in retrieved_docs
-            ]
-        }
+        Args:
+            query: Text to match against ready document chunks in the bound chat.
+            k_returns: Maximum chunks to return, from one to twenty.
 
-        return serialized_context, artifact
-    except Exception as e:
-        import traceback
-        print(f"[Tool: retrieve_context] CRITICAL EXCEPTION inside context retrieval:")
-        traceback.print_exc()
-        return f"Error querying local context space: {str(e)}", {}
+        Returns:
+            Context text and a citation artifact containing document UUIDs and
+            original filenames. Return empty context when no ready documents match.
+        """
+        from src.backend.database.session import async_session_maker
+        from src.backend.indexing.resources import get_document_vector_index
+        from src.backend.indexing.retrieval import ConversationRetriever
+
+        try:
+            retriever = ConversationRetriever(async_session_maker, get_document_vector_index())
+            documents = await retriever.search(conversation_id, query, limit=k_returns)
+            source_ids = list(
+                dict.fromkeys(document.metadata["source_file_id"] for document in documents)
+            )
+            context = "\n\n".join(
+                f"Source: {document.metadata['source']}\nContent: {document.page_content}"
+                for document in documents
+            )
+            return context, {
+                "source_file_ids": source_ids,
+                "raw_documents": [
+                    {"source": document.metadata["source"], "content": document.page_content}
+                    for document in documents
+                ],
+            }
+        except Exception as error:
+            logger.error(
+                "Document retrieval failed conversation_id=%s exception_type=%s",
+                conversation_id,
+                type(error).__name__,
+            )
+            return "Document search is temporarily unavailable.", {}
+
+    return retrieve_context
 
 
 @tool
 async def tavily_search(query: str, max_results: int = 5) -> str:
     """
-    Searches the internet for the given query and returns live web results 
-    including titles, text snippets, and source links. 
-    
-    Use a higher 'max_results' (up to 10) if the query requires deep, comprehensive 
+    Searches the internet for the given query and returns live web results
+    including titles, text snippets, and source links.
+
+    Use a higher 'max_results' (up to 10) if the query requires deep, comprehensive
     research or cross-referencing multiple viewpoints.
     """
-    tavily_key = os.getenv('TAVILY_KEY')
+    tavily_key = os.getenv("TAVILY_KEY")
     if not tavily_key:
         print("[Search Tool Warning]: TAVILY_API_KEY is missing from environment variables.")
         return "Error: Web search engine is currently unconfigured. Missing API credentials."
@@ -89,28 +104,27 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
     try:
         # FIX: Explicitly passing the key into the tool constructor so it actually gets used!
         search_tool = TavilySearchResults(
-            tavily_api_key=tavily_key,
-            max_results=min(max(max_results, 1), 10)
+            tavily_api_key=tavily_key, max_results=min(max(max_results, 1), 10)
         )
-        
+
         results = await search_tool.ainvoke({"query": query})
-        
+
         if not results:
             print(f"No results found for query: '{query}'")
             return f"Search completed, but no relevant results were found for: '{query}'"
-        
+
         formatted_results = []
         for i, res in enumerate(results, start=1):
-            title = res.get('title', f"Web Result {i}")
-            snippet = res.get('content', '(No snippet text available)')
-            link = res.get('url', '(No link available)')
-            
+            title = res.get("title", f"Web Result {i}")
+            snippet = res.get("content", "(No snippet text available)")
+            link = res.get("url", "(No link available)")
+
             result_block = f"Title: {title}\nSnippet: {snippet}\nLink: {link}"
             formatted_results.append(result_block)
-            
+
         final_output = "\n\n---\n\n".join(formatted_results)
         print(f"[Search Success] Captured {len(formatted_results)} results for query: '{query}'")
-        
+
         return final_output
 
     except Exception as e:
@@ -178,92 +192,3 @@ async def fetch_web_page(url: str) -> str:
         return f"HTTP error {e.response.status_code} returned while fetching page: {url}"
     except Exception as e:
         return f"An error occurred while attempting to parse the page link: {str(e)}"
-
-
-TOOLS = [retrieve_context, fetch_web_page, tavily_search]
-
-
-# @tool
-# async def read_emails(
-#     query: str = "", 
-#     num_read: int = 5, 
-#     user_id: str = None,
-#     runnable_config: RunnableConfig = ...
-# ) -> str:
-#     """
-#     Search and read the user's Gmail inbox. 
-#     The 'query' parameter uses standard Gmail search operators (e.g., 'from:name', 'is:unread', 'subject:urgent').
-#     Leave query empty to simply fetch the most recent emails.
-#     """
-#     actual_config = runnable_config if runnable_config is not ... else None
-#     print(f"\n[DEBUG read_emails] Starting email retrieval...")
-#     print(f"  - query: '{query}'")
-#     print(f"  - num_read: {num_read}")
-#     print(f"  - user_id (arg): '{user_id}'")
-#     print(f"  - runnable_config type: {type(runnable_config)}")
-#     print(f"  - runnable_config: {runnable_config}")
-
-#     if not user_id and actual_config:
-#         configurable = actual_config.get("configurable", {})
-#         user_id = configurable.get("user_id")
-#         print(f"  - Resolved user_id from config: '{user_id}'")
-
-#     if not user_id:
-#         print("[DEBUG read_emails] ERROR: user_id could not be resolved from arguments or config!")
-#         return "Error: System failed to securely pass the contextual user session identifier."
-    
-#     try:
-#         print("[DEBUG read_emails] Opening database session and loading Google OAuth credentials...")
-#         async with async_session_maker() as session:
-#             creds = await get_google_credentials(user_id, session)
-#         print("[DEBUG read_emails] Google OAuth credentials successfully retrieved.")
-        
-#         loop = asyncio.get_running_loop()
-
-#         def fetch_email_sync():
-#             print("[DEBUG read_emails] Building Gmail API service connection...")
-#             service = build('gmail', 'v1', credentials=creds)
-            
-#             print(f"[DEBUG read_emails] Listing user messages (q='{query}', limit={num_read})...")
-#             results = service.users().messages().list(
-#                 userId='me', 
-#                 maxResults=num_read, 
-#                 q=query
-#             ).execute()
-
-#             messages = results.get('messages', [])
-#             print(f"[DEBUG read_emails] Found {len(messages)} raw email messages.")
-#             if not messages:
-#                 return f"No emails found matching the search criteria: '{query}'" if query else "Your inbox is completely empty."
-            
-#             email_summaries = []
-#             for i, msg in enumerate(messages):
-#                 print(f"[DEBUG read_emails] Fetching message detail [{i}] ID: {msg['id']}...")
-#                 full_msg = service.users().messages().get(
-#                     userId='me',
-#                     id=msg['id'],
-#                     format='full'
-#                 ).execute()
-
-#                 payload = full_msg.get('payload', {})
-#                 headers = payload.get('headers', [])
-
-#                 subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '(No Subject)')
-#                 sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '(Unknown Sender)')
-#                 snippet = full_msg.get('snippet', '')
-                
-#                 print(f"  - Email [{i}]: FROM='{sender}', SUBJECT='{subject}', Snippet: '{snippet[:40]}...'")
-                
-#                 summary = f"[ID: {msg['id']}]\nFROM: {sender}\nSUBJECT: {subject}\nSUMMARY: {snippet}"
-#                 email_summaries.append(summary)
-            
-#             return "\n\n---\n\n".join(email_summaries)
-        
-#         messages = await loop.run_in_executor(None, fetch_email_sync)
-#         print("[DEBUG read_emails] Email summaries successfully retrieved.")
-#         return messages
-#     except Exception as e:
-#         import traceback
-#         print(f"[DEBUG read_emails] CRITICAL EXCEPTION inside email retrieval:")
-#         traceback.print_exc()
-#         return f"Failed to retrieve message logs safely from Gmail API service: {str(e)}"

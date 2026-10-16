@@ -9,26 +9,35 @@ from src.backend.database.session import upgrade_database_schema, async_session_
 from src.backend.execution.config import ExecutorSettings
 from src.backend.execution.store import RunStore
 from src.backend.execution.worker import RunExecutor
+from src.backend.indexing.config import IndexingSettings
+from src.backend.indexing.resources import get_document_vector_index
+from src.backend.indexing.store import IndexingStore
+from src.backend.indexing.worker import IndexingWorker
 from src.backend.uploads.config import UploadSettings
 from src.backend.uploads.storage import remove_orphaned_upload_batches
-from src.backend.routes import chat_router, conversation_router, uploads_router, models_router
-from src.backend.routes.dependencies import get_model_manager, get_vector_db, get_ai
+from src.backend.routes import chat_router, conversation_router, models_router
+from src.backend.routes.dependencies import get_model_manager, get_ai
 from src.backend.services.model_services import ModelService
 from src.backend.ai.llms.huggingface import path as cpp_models_dir
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Prepare the database, upload storage, models and run executor before serving requests.
+    """Prepare storage/AI and start the indexing/run workers before serving requests.
 
-    app is the root FastAPI application. Apply migrations, remove old uncommitted
-    upload batches, synchronize local models and initialize AI dependencies. Start
-    the executor without an AI handler at this stage; queued jobs remain queued.
-    Yield when startup finishes and always stop the executor when serving ends.
-    Migration/setup errors propagate; model synchronization errors are logged.
+    Args:
+        app: Root FastAPI application that exposes worker instances on app.state.
+
+    Yields:
+        None after migrations, orphan cleanup, model synchronization and worker
+        startup. Indexing processes pending files; AI runs still await BE-10's handler.
+
+    Stop both workers when serving ends, including when startup/body raises.
+    Migration/worker initialization failures propagate; model sync failures are logged.
     """
     executor_settings = ExecutorSettings.from_environment()
     upload_settings = UploadSettings.from_environment()
+    indexing_settings = IndexingSettings.from_environment()
     print()
     print("=" * 60)
     print()
@@ -92,7 +101,7 @@ async def lifespan(app: FastAPI):
 
     # Eagerly initialize heavy singletons so they are ready before the first request
     print("[INFO] Initializing Vector DB")
-    get_vector_db()
+    vector_index = get_document_vector_index()
     print("[INFO] Vector DB initialized.")
     print()
 
@@ -103,6 +112,13 @@ async def lifespan(app: FastAPI):
 
     executor = RunExecutor(RunStore(async_session_maker), settings=executor_settings)
     app.state.run_executor = executor
+    indexer = IndexingWorker(
+        IndexingStore(async_session_maker),
+        vector_index,
+        upload_settings.root / "indexing_locks",
+        settings=indexing_settings,
+    )
+    app.state.indexing_worker = indexer
     await executor.start()
 
     print()
@@ -115,9 +131,13 @@ async def lifespan(app: FastAPI):
     print()
 
     try:
+        await indexer.start()
         yield
     finally:
-        await executor.stop()
+        try:
+            await indexer.stop()
+        finally:
+            await executor.stop()
     print("[INFO] Shutting down LocalMind backend...")
     print()
     print("=" * 60)
@@ -137,6 +157,5 @@ app.add_middleware(
 
 app.include_router(chat_router)
 app.include_router(conversation_router)
-app.include_router(uploads_router)
 app.include_router(models_router)
 install_api_foundation(app)

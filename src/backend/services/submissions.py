@@ -95,6 +95,7 @@ async def build_submission_response(
         message_id=run.message_id,
         run_id=run.id,
         status=submission.status,
+        error=submission.error,
         documents=[
             DocumentResponse(
                 id=document.id,
@@ -104,6 +105,8 @@ async def build_submission_response(
                 file_size=document.file_size,
                 status=document.status,
                 deleted=document.deleted_at is not None,
+                error=document.error,
+                chunk_count=document.chunk_count,
             )
             for document in documents
         ],

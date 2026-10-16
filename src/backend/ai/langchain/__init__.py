@@ -1,5 +1,1 @@
-from src.backend.ai.langchain.vector_db import LocalMindVectorDB as LocalMindVectorDB
-
-__all__ = [
-    'LocalMindVectorDB'
-]
+"""Provide web tools and conversation-bound document search for the AI graph."""
