@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.backend.api.application import install_api_foundation
 from src.backend.constants import DEFAULT_MODEL_REPO_ID, DEFAULT_MODEL_GGUF_FILE
 from src.backend.database.session import upgrade_database_schema, async_session_maker
+from src.backend.execution.config import ExecutorSettings
+from src.backend.execution.store import RunStore
+from src.backend.execution.worker import RunExecutor
 from src.backend.routes import chat_router, conversation_router, uploads_router, models_router
 from src.backend.routes.dependencies import get_model_manager, get_vector_db, get_ai
 from src.backend.services.model_services import ModelService
@@ -14,12 +17,13 @@ from src.backend.ai.llms.huggingface import path as cpp_models_dir
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    executor_settings = ExecutorSettings.from_environment()
     print()
-    print("="*60)
+    print("=" * 60)
     print()
     print("[INFO] Initializing LocalMind backend.")
     print()
-    print("="*60)
+    print("=" * 60)
     print()
 
     print("[INFO] Initializing Database...")
@@ -82,20 +86,28 @@ async def lifespan(app: FastAPI):
     print("[INFO] AI engine initialized.")
     print()
 
+    executor = RunExecutor(RunStore(async_session_maker), settings=executor_settings)
+    app.state.run_executor = executor
+    await executor.start()
+
     print()
-    print("="*60)
+    print("=" * 60)
     print("[INFO] LocalMind backend is ready.")
-    print("="*60)
+    print("=" * 60)
     print()
     print("[INFO] To stop the backend, press Ctrl+C.")
-    print("="*60)
+    print("=" * 60)
     print()
 
-    yield
+    try:
+        yield
+    finally:
+        await executor.stop()
     print("[INFO] Shutting down LocalMind backend...")
     print()
-    print("="*60)
+    print("=" * 60)
     print()
+
 
 app = FastAPI(lifespan=lifespan)
 

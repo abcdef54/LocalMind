@@ -816,6 +816,16 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - Chỉ hoàn thành tầng schema/constraints: executor, idempotent HTTP submission và lifecycle transitions lần lượt thuộc BE-05/BE-07/BE-10/BE-15; chưa mở endpoint run/submission.
 - Tổng kiểm chứng BE-03/BE-04: 25 API tests và 22 migration/schema tests pass trên PostgreSQL 15 tạm; không migrate database app thực và không chạy model.
 
+### BE-05 — Durable run executor: hoàn thành (2026-10-16)
+
+- Thêm `execution/` gồm settings, PostgreSQL run store và dispatcher async chạy trong lifespan backend; không thêm Redis, worker container hoặc schema mới.
+- Chỉ claim run queued có submission ready/conversation chưa archive; `FOR UPDATE SKIP LOCKED` và advisory transaction lock bảo vệ count-and-claim, mặc định một slot chung cho các executor dùng cùng DB/config.
+- Mỗi claim có owner token riêng và attempt; heartbeat dùng clock DB, không gia hạn lease đã hết. Kết quả assistant và trạng thái completed được publish trong transaction có kiểm tra lease/ownership/cancel.
+- Lease mất/hết hoặc compute chưa xác định đã dừng: đánh dấu interrupted, giữ slot; không tự requeue inference. Adapter/operator chỉ acknowledge để nhả slot sau khi xác nhận compute đã dừng; primitive này chưa có endpoint HTTP.
+- Shutdown ngừng dispatch, drain có grace period, sau đó fence/cancel tác vụ chưa xong. Handler chống cancellation không khiến executor đợi vô hạn; slot vẫn bị giữ và kết quả về muộn không được persist.
+- Production chưa đăng ký handler AI: dispatcher phục hồi trạng thái nhưng không claim run chờ để chạy giả. `/chat` legacy chưa đi qua admission này; tích hợp pipeline/citations/metadata thuộc BE-10, cancel API đầy đủ thuộc BE-15.
+- Kiểm thử bằng fake handlers và PostgreSQL 15 thật: 21 tests execution/config/lifespan và 25 API regression tests pass, không gọi model/GPU. Hướng dẫn và giới hạn vận hành: `src/backend/execution/README.md`.
+
 ## 18. Implementation Tasks
 
 | Task | Phạm vi thực hiện | Tiêu chí hoàn thành |
