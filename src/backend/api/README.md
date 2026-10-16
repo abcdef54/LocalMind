@@ -1,4 +1,4 @@
-# API v1 foundation (BE-02)
+# API v1 (BE-02 / BE-03)
 
 API v1 is mounted as a separate FastAPI application at `/api/v1` so its exception
 handlers and OpenAPI contract do not change legacy response bodies.
@@ -6,15 +6,60 @@ handlers and OpenAPI contract do not change legacy response bodies.
 - Legacy routes and documentation remain at their existing paths, including
   `/chat`, `/conversation`, `/uploads`, `/models`, and `/docs`.
 - V1 documentation: `/api/v1/docs`; schema: `/api/v1/openapi.json`.
-- No conversation, submission, run or inference endpoints are implemented in v1
-  yet. The schema publishes shared `ChatSettings` and `ErrorResponse` components
-  even while the v1 paths collection is empty.
+- Conversation CRUD and bounded history endpoints are implemented. Submission,
+  run execution and inference endpoints are not published yet; BE-04 adds their
+  database schema only. Shared contracts remain available in OpenAPI.
 - Add completed feature routers in `v1/router.py`. Feature endpoints use the
   existing main application lifespan/database resources; do not add a second
   AI/database startup lifecycle to the mounted application.
 
 The implementation follows FastAPI's [mounted application documentation](https://fastapi.tiangolo.com/advanced/sub-applications/)
 and [custom error handlers](https://fastapi.tiangolo.com/tutorial/handling-errors/).
+
+## Conversations and history
+
+| Method | Endpoint | Response |
+|---|---|---|
+| POST | `/api/v1/conversations` | 201; JSON body `{ "title": "Research" }` |
+| GET | `/api/v1/conversations?limit=50&before=...` | Conversation page, newest first |
+| GET | `/api/v1/conversations/{id}` | Conversation metadata or 404 |
+| PATCH | `/api/v1/conversations/{id}` | Updated metadata; JSON body `{ "title": "New title" }` |
+| DELETE | `/api/v1/conversations/{id}` | 204; archive metadata, or 409 `RUN_ACTIVE` |
+| GET | `/api/v1/conversations/{id}/messages?limit=50&before=...` | Newest history page, messages ordered oldest to newest within the page |
+
+Titles are trimmed, required and limited to 255 characters. Unknown body fields
+are rejected. Conversation IDs are UUIDs. Missing/archived conversations return
+404 `CONVERSATION_NOT_FOUND`; repeated delete returns 404, not a second success.
+
+Both list APIs return `{ "items": [...], "next_cursor": "...", "has_more": true }`.
+Use `next_cursor` as the next request's `before` value; when exhausted it is null
+and `has_more` is false. Default limit is 50, allowed range is 1–100. A request
+queries at most limit + 1 rows, without OFFSET, a total count or a full-history
+fetch. Conversation list ordering is creation time, not most recent activity.
+
+Cursors encode `(created_at, id)` with resource/conversation scope. They remain
+usable if the anchor message is deleted or newer messages arrive. Malformed or
+wrong-scope cursors return 422 `INVALID_CURSOR`; invalid query limits return the
+standard validation error. Cursors are opaque pagination tokens, not access
+credentials or signed authorization tokens.
+
+Message output includes model/personality/reasoning metadata, nullable
+`submission_id`/`run_id`, and scoped citation metadata. Storage paths and file
+bytes are not included. Deleted documents have `deleted: true`; cross-conversation
+citation links are excluded. Legacy message timestamps are stored as naive UTC
+and serialized with a UTC offset. This task does not change that storage type.
+
+DELETE archives the conversation, its messages and attachment metadata in one
+transaction, retaining content for the later physical-cleanup workflow. It does
+not initialize Chroma, remove blobs or purge vectors; those are BE-08/BE-09 work.
+The legacy deletion endpoint keeps its existing behavior. Until the RAG scoping
+task is complete, metadata archival is not a claim that legacy global retrieval
+has been fixed. New run creation must lock/check the conversation before accepting
+work; the FK alone does not distinguish an archived row from an active row.
+
+Pagination does not implement a message cache yet. Its cursor/page-size contract
+allows future per-page caching, and LLM context is still built server-side rather
+than from the browser's currently loaded pages.
 
 ## ChatSettings contract
 
@@ -105,9 +150,20 @@ actual SSE/event transport will be implemented in BE-14.
 python -m unittest discover -s src/backend/api/tests -v
 ```
 
-No DB/GPU/model download is needed. Test-only routes exercise the real installed
-middleware and handlers; they are never included in the production router. A
-production-wiring test calls the existing conversation route with its service
-dependency overridden, without entering the application startup lifespan.
+Foundation tests need no DB/GPU/model download. Test-only routes exercise the real
+installed middleware and handlers; they are never included in the production
+router. A production-wiring test calls the existing conversation route with its
+service dependency overridden, without entering the application startup lifespan.
+
+Conversation integration tests use the same explicitly disposable PostgreSQL
+database as migration tests and drop/recreate its schema before each case:
+
+```bash
+export LOCALMIND_MIGRATION_TEST_URL='postgresql+asyncpg://postgres:TEST_PASSWORD@127.0.0.1:TEST_PORT/localmind_migration_tests'
+python -m unittest discover -s src/backend/api/tests -v
+```
+
+Without that variable the database tests skip. Run API/database suites
+sequentially when sharing one test database; do not run them concurrently.
 
 The test client uses HTTPX, already available in the current AI dependency stack.

@@ -1,4 +1,4 @@
-# Database migrations (BE-01)
+# Database migrations
 
 Alembic manages schema changes. Application startup runs `upgrade head` in the
 database transaction before initializing models or the AI engine. No AI/model
@@ -64,6 +64,40 @@ tables adopted from a legacy database. It is for disposable development/test
 databases, not a way to undo baseline adoption while preserving application data.
 Restore the pre-migration backup if that is the intended recovery.
 
+## Revisions after the baseline
+
+| Revision | Scope |
+|---|---|
+| `0002_history_pagination` | Index conversations/messages for cursor queries; require conversation creation timestamps |
+| `0003_submissions_runs` | Durable submission/run tables, snapshot/status fields, optional legacy-message links, uniqueness and scoped foreign keys |
+
+Revision 0002 backfills only explicitly NULL conversation creation timestamps
+with migration time, since the original creation time is unknown. Existing
+non-null timestamps and message storage types are preserved. Message dates remain
+naive UTC for compatibility; v1 serializes them as UTC-aware timestamps.
+
+Revision 0003 leaves `submission_id` and `run_id` NULL on preexisting messages.
+It does not invent submissions/runs for historic chats or trigger inference.
+New submission uniqueness is `(conversation_id, client_submission_id)`. A
+fingerprint is a 64-character lowercase SHA-256 hex string; computation and
+payload-conflict handling belong to the submission API task, not this schema.
+
+Submissions/runs store JSON object settings snapshots and constrained statuses.
+SQL checks ensure JSON object shape, not every ChatSettings field; the service
+must validate the complete contract before inserting a snapshot. Runs also have
+attempt, lease, cancellation/error and timing fields for the future executor.
+
+One submission has at most one user message/run; one run has at most one assistant
+result. Composite foreign keys enforce conversation/submission/result ownership,
+including preventing a run from borrowing another run's answer. A partial unique
+index permits only one pending/queued/running/cancel_requested run per conversation.
+A completed run requires its own result message. Full state transitions, leasing
+and retries are implemented in BE-05/BE-10/BE-15, not by the schema alone.
+
+Downgrading to revision 0001 removes new submission/run data and link columns but
+preserves legacy tables/rows. It must not be used to retain a new run history.
+Downgrading all the way to base still drops the legacy application tables.
+
 Offline SQL is available via `python -m alembic upgrade head --sql`, but that
 script is only for a new empty database. Offline mode cannot validate or adopt a
 legacy schema.
@@ -96,3 +130,6 @@ python -m unittest discover -s src/backend/database/tests -v
 Without the explicit test URL, integration tests skip. Cases cover empty/legacy
 databases, preservation of rows and citation links, repeated startup, schema
 drift rejection, downgrade/re-upgrade, async CLI and offline SQL generation.
+Submission/run tests also check concurrent writes, idempotency uniqueness,
+active-run admission constraints, result ownership and invalid snapshots/states.
+Run this suite sequentially with API integration tests when using the same DB.

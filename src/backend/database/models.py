@@ -1,10 +1,29 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Integer, BigInteger, Float, Boolean, Table
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    Column,
+    String,
+    Text,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    BigInteger,
+    Float,
+    Boolean,
+    Table,
+    Index,
+    UniqueConstraint,
+    CheckConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship, DeclarativeBase
 from sqlalchemy.sql import func
 
 import uuid
 import datetime
+
+ACTIVE_RUN_STATUSES = ("pending", "queued", "running", "cancel_requested")
+
 
 class Base(DeclarativeBase):
     pass
@@ -12,32 +31,80 @@ class Base(DeclarativeBase):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (Index("ix_conversations_created_id", "created_at", "id"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, nullable=False, default=uuid.uuid4)
     title = Column(String(255), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     deleted_at = Column(DateTime, nullable=True)
 
     summary = Column(Text, nullable=True)
     message_count = Column(Integer, nullable=False, default=0)
     unsummarized_message_count = Column(Integer, nullable=False, default=0)
 
-    messages = relationship("Message", back_populates="conversation", passive_deletes=True, cascade="all, delete-orphan")
-    attachments = relationship("Attachment", back_populates="conversation", passive_deletes=True, cascade="all, delete-orphan")
+    messages = relationship(
+        "Message", back_populates="conversation", passive_deletes=True, cascade="all, delete-orphan"
+    )
+    attachments = relationship(
+        "Attachment",
+        back_populates="conversation",
+        passive_deletes=True,
+        cascade="all, delete-orphan",
+    )
 
 
 message_attachments = Table(
-    'message_attachments',
+    "message_attachments",
     Base.metadata,
-    Column('message_id', UUID(as_uuid=True), ForeignKey('messages.id', ondelete='CASCADE'), primary_key=True),
-    Column('attachment_id', UUID(as_uuid=True), ForeignKey('attachments.id', ondelete='CASCADE'), primary_key=True)
+    Column(
+        "message_id",
+        UUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "attachment_id",
+        UUID(as_uuid=True),
+        ForeignKey("attachments.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
 )
+
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_conversation_created_id", "conversation_id", "created_at", "id"),
+        UniqueConstraint("submission_id", name="uq_messages_submission_id"),
+        UniqueConstraint("run_id", name="uq_messages_run_id"),
+        UniqueConstraint(
+            "id", "submission_id", "conversation_id", name="uq_messages_input_identity"
+        ),
+        UniqueConstraint("id", "run_id", "conversation_id", name="uq_messages_result_identity"),
+        ForeignKeyConstraint(
+            ["submission_id", "conversation_id"],
+            ["submissions.id", "submissions.conversation_id"],
+            name="fk_messages_submission_conversation",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "conversation_id"],
+            ["runs.id", "runs.conversation_id"],
+            name="fk_messages_run_conversation",
+            use_alter=True,
+        ),
+        CheckConstraint(
+            "submission_id IS NULL OR role = 'user'", name="ck_messages_submission_role"
+        ),
+        CheckConstraint("run_id IS NULL OR role = 'assistant'", name="ck_messages_run_role"),
+    )
 
     id = Column(UUID(as_uuid=True), nullable=False, primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     content = Column(Text, nullable=False)
     role = Column(String(20), nullable=False)
     personality = Column(String(50), nullable=True)
@@ -46,16 +113,23 @@ class Message(Base):
     temperature = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)
+    submission_id = Column(UUID(as_uuid=True), nullable=True)
+    run_id = Column(UUID(as_uuid=True), nullable=True)
 
-    citations = relationship('Attachment', secondary=message_attachments, lazy='selectin')
+    citations = relationship("Attachment", secondary=message_attachments, lazy="selectin")
     conversation = relationship("Conversation", back_populates="messages", passive_deletes=True)
 
 
 class Attachment(Base):
-    __tablename__ = 'attachments'
+    __tablename__ = "attachments"
 
     id = Column(UUID(as_uuid=True), nullable=False, primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey('conversations.id', ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     file_name = Column(String(255), nullable=False)
     file_path = Column(String(512), nullable=False)
     file_type = Column(String(255), nullable=False)
@@ -64,7 +138,8 @@ class Attachment(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)
 
-    conversation = relationship('Conversation', back_populates="attachments", passive_deletes=True)
+    conversation = relationship("Conversation", back_populates="attachments", passive_deletes=True)
+
 
 class InstalledModel(Base):
     __tablename__ = "installed_models"
@@ -81,3 +156,112 @@ class InstalledModel(Base):
     size_bytes = Column(BigInteger, nullable=False)
     installed_at = Column(DateTime, server_default=func.now())
     is_default = Column(Boolean, nullable=False, default=False)
+
+
+class Submission(Base):
+    """A durable send operation, uniquely identified by the client within a conversation."""
+
+    __tablename__ = "submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id", "client_submission_id", name="uq_submissions_client_key"
+        ),
+        UniqueConstraint("id", "conversation_id", name="uq_submissions_identity"),
+        CheckConstraint("fingerprint ~ '^[0-9a-f]{64}$'", name="ck_submissions_fingerprint"),
+        CheckConstraint(
+            "status IN ('accepted', 'indexing', 'ready', 'failed', 'cancelled')",
+            name="ck_submissions_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(settings_snapshot) = 'object'", name="ck_submissions_settings"
+        ),
+        CheckConstraint(
+            "error IS NULL OR jsonb_typeof(error) = 'object'", name="ck_submissions_error"
+        ),
+        Index("ix_submissions_status_created", "status", "created_at"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    client_submission_id = Column(UUID(as_uuid=True), nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    settings_snapshot = Column(JSONB, nullable=False)
+    status = Column(String(24), nullable=False, server_default="accepted")
+    error = Column(JSONB(none_as_null=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class Run(Base):
+    """One execution for a submission; retries reuse this identity and increment attempt."""
+
+    __tablename__ = "runs"
+    __table_args__ = (
+        UniqueConstraint("submission_id", name="uq_runs_submission_id"),
+        UniqueConstraint("message_id", name="uq_runs_message_id"),
+        UniqueConstraint("id", "conversation_id", name="uq_runs_identity"),
+        ForeignKeyConstraint(
+            ["submission_id", "conversation_id"],
+            ["submissions.id", "submissions.conversation_id"],
+            name="fk_runs_submission_conversation",
+        ),
+        ForeignKeyConstraint(
+            ["message_id", "submission_id", "conversation_id"],
+            ["messages.id", "messages.submission_id", "messages.conversation_id"],
+            name="fk_runs_input_submission",
+        ),
+        ForeignKeyConstraint(
+            ["result_message_id", "id", "conversation_id"],
+            ["messages.id", "messages.run_id", "messages.conversation_id"],
+            name="fk_runs_result_identity",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'queued', 'running', 'cancel_requested', 'completed', 'failed', 'cancelled', 'interrupted')",
+            name="ck_runs_status",
+        ),
+        CheckConstraint("attempt >= 0", name="ck_runs_attempt"),
+        CheckConstraint("jsonb_typeof(settings_snapshot) = 'object'", name="ck_runs_settings"),
+        CheckConstraint("error IS NULL OR jsonb_typeof(error) = 'object'", name="ck_runs_error"),
+        CheckConstraint(
+            "status != 'completed' OR result_message_id IS NOT NULL",
+            name="ck_runs_completed_result",
+        ),
+        Index("ix_runs_status_created", "status", "created_at"),
+        Index(
+            "uq_runs_active_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'queued', 'running', 'cancel_requested')"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    submission_id = Column(UUID(as_uuid=True), nullable=False)
+    message_id = Column(UUID(as_uuid=True), nullable=False)
+    result_message_id = Column(UUID(as_uuid=True), nullable=True)
+    settings_snapshot = Column(JSONB, nullable=False)
+    status = Column(String(24), nullable=False, server_default="pending")
+    error = Column(JSONB(none_as_null=True), nullable=True)
+    attempt = Column(Integer, nullable=False, server_default=text("0"))
+    cancel_requested = Column(Boolean, nullable=False, server_default=text("false"))
+    lease_owner = Column(String(128), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )

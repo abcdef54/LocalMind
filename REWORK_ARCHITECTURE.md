@@ -796,7 +796,27 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 
 
 
-## 17. Implementation Tasks
+### BE-03 — Conversations v1 và cursor pagination: hoàn thành (2026-10-16)
+
+- Thêm create/list/get/rename/archive conversation ở `/api/v1/conversations`; API cũ giữ nguyên.
+- Messages trả từng trang, mặc định 50, cap 100; query SQL `LIMIT limit + 1`, không OFFSET/COUNT hoặc tải hết rồi slice. Cursor theo `(created_at, id)`, kiểm tra resource/conversation scope.
+- Conversation list mới → cũ; messages trong mỗi trang cũ → mới. Response có `items`, `next_cursor`, `has_more`; UTC serialization giữ tương thích timestamp legacy.
+- Migration `0002_history_pagination` thêm indexes và backfill `Conversation.created_at` NULL bằng thời điểm migration trước khi đặt NOT NULL; không đổi timestamp đã có.
+- Archive là soft-delete metadata trong transaction, chặn run active; cleanup file/vector vật lý thuộc BE-09, RAG legacy chưa được sửa phạm vi ở bước này.
+- Kiểm chứng trên PostgreSQL 15: chat 1.005 tin/21 trang, timestamp trùng, thêm tin mới/xóa anchor, cursor sai scope, giới hạn query và citation scoping; không trùng/mất tin.
+- Chưa thêm cache; contract phân trang sẵn cho cache theo từng page.
+
+### BE-04 — Submission/run schema: hoàn thành (2026-10-16)
+
+- Migration `0003_submissions_runs` tạo hai bảng với status/error/settings snapshot, client key/fingerprint, attempt/lease/cancel/timing fields; thêm nullable submission/run links cho messages.
+- Unique constraints chống trùng client key theo conversation, user message/run theo submission và assistant result theo run. Composite foreign keys chặn gắn sai conversation/submission hoặc mượn answer của run khác.
+- Partial unique index chỉ cho một run active mỗi conversation; completed run bắt buộc có result đúng identity.
+- Legacy messages giữ nguyên nội dung/citations và có links NULL. Không tạo giả các submission/run lịch sử, không sửa frozen baseline.
+- Kiểm chứng cả DB trống, unversioned legacy và DB đã có baseline; migration/downgrade/re-upgrade giữ legacy rows. Hai transaction đồng thời với cùng client key chỉ một transaction commit được.
+- Chỉ hoàn thành tầng schema/constraints: executor, idempotent HTTP submission và lifecycle transitions lần lượt thuộc BE-05/BE-07/BE-10/BE-15; chưa mở endpoint run/submission.
+- Tổng kiểm chứng BE-03/BE-04: 25 API tests và 22 migration/schema tests pass trên PostgreSQL 15 tạm; không migrate database app thực và không chạy model.
+
+## 18. Implementation Tasks
 
 | Task | Phạm vi thực hiện | Tiêu chí hoàn thành |
 |---|---|---|

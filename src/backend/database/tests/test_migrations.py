@@ -5,17 +5,20 @@ localmind_migration_tests. Each test drops that database's public schema.
 """
 
 import asyncio
+from datetime import datetime
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from alembic.util import CommandError
 import sqlalchemy as sa
 from sqlalchemy.engine import make_url
@@ -25,9 +28,10 @@ from src.backend.database.config import PROJECT_ROOT
 from src.backend.database.migration import upgrade_database
 from src.backend.database.models import Base
 
-
 TEST_DATABASE_URL = os.getenv("LOCALMIND_MIGRATION_TEST_URL")
 BASELINE_REVISION = "0001_existing_schema"
+MIGRATION_SCRIPTS = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
+LEGACY_METADATA = MIGRATION_SCRIPTS.get_revision(BASELINE_REVISION).module.baseline_metadata()
 
 
 @unittest.skipUnless(TEST_DATABASE_URL, "LOCALMIND_MIGRATION_TEST_URL is not configured")
@@ -60,7 +64,9 @@ class MigrationIntegrationTests(unittest.TestCase):
     def assert_at_head(self) -> None:
         with self.engine.connect() as connection:
             migration_context = MigrationContext.configure(connection)
-            self.assertEqual(migration_context.get_current_revision(), BASELINE_REVISION)
+            self.assertEqual(
+                migration_context.get_current_revision(), MIGRATION_SCRIPTS.get_current_head()
+            )
             self.assertEqual(
                 compare_metadata(migration_context, Base.metadata),
                 [],
@@ -74,19 +80,31 @@ class MigrationIntegrationTests(unittest.TestCase):
     def seed_legacy_database(self) -> None:
         """Emulate the old create_all startup, including rows and citation links."""
         with self.engine.begin() as connection:
-            Base.metadata.create_all(connection)
+            LEGACY_METADATA.create_all(connection)
             conversation_id = connection.execute(
-                Base.metadata.tables["conversations"].insert().values(title="Existing chat")
+                LEGACY_METADATA.tables["conversations"]
+                .insert()
+                .values(
+                    id=uuid4(), title="Existing chat", message_count=1, unsummarized_message_count=1
+                )
             ).inserted_primary_key[0]
             message_id = connection.execute(
-                Base.metadata.tables["messages"].insert().values(
+                LEGACY_METADATA.tables["messages"]
+                .insert()
+                .values(
+                    id=uuid4(),
+                    created_at=datetime(2026, 1, 1),
                     conversation_id=conversation_id,
                     content="Keep this message",
                     role="assistant",
                 )
             ).inserted_primary_key[0]
             attachment_id = connection.execute(
-                Base.metadata.tables["attachments"].insert().values(
+                LEGACY_METADATA.tables["attachments"]
+                .insert()
+                .values(
+                    id=uuid4(),
+                    created_at=datetime(2026, 1, 1),
                     conversation_id=conversation_id,
                     file_name="existing.pdf",
                     file_path="/existing/file.pdf",
@@ -95,13 +113,18 @@ class MigrationIntegrationTests(unittest.TestCase):
                 )
             ).inserted_primary_key[0]
             connection.execute(
-                Base.metadata.tables["message_attachments"].insert().values(
+                LEGACY_METADATA.tables["message_attachments"]
+                .insert()
+                .values(
                     message_id=message_id,
                     attachment_id=attachment_id,
                 )
             )
             connection.execute(
-                Base.metadata.tables["installed_models"].insert().values(
+                LEGACY_METADATA.tables["installed_models"]
+                .insert()
+                .values(
+                    id=uuid4(),
                     display_name="Existing model",
                     model_name="existing-model",
                     hf_repo="local/existing",
@@ -119,7 +142,7 @@ class MigrationIntegrationTests(unittest.TestCase):
                 table.name: list(
                     connection.execute(sa.select(table).order_by(*table.primary_key.columns))
                 )
-                for table in Base.metadata.sorted_tables
+                for table in LEGACY_METADATA.sorted_tables
             }
 
     def test_empty_database_upgrades_and_matches_orm_schema(self) -> None:
@@ -137,9 +160,45 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_at_head()
         self.assertEqual(self.legacy_rows(), original_rows)
 
+    def test_versioned_baseline_upgrades_without_rewriting_legacy_data(self) -> None:
+        with self.engine.begin() as connection:
+            command.upgrade(self.migration_config(connection), BASELINE_REVISION)
+        self.seed_legacy_database()
+        original_rows = self.legacy_rows()
+        with self.engine.begin() as connection:
+            upgrade_database(connection)
+        self.assert_at_head()
+        self.assertEqual(self.legacy_rows(), original_rows)
+        with self.engine.connect() as connection:
+            legacy_message = (
+                connection.execute(sa.select(Base.metadata.tables["messages"])).mappings().one()
+            )
+            self.assertIsNone(legacy_message["submission_id"])
+            self.assertIsNone(legacy_message["run_id"])
+
+    def test_null_legacy_conversation_time_is_backfilled_before_cursor_indexing(self) -> None:
+        self.seed_legacy_database()
+        with self.engine.begin() as connection:
+            connection.execute(sa.text("UPDATE conversations SET created_at = NULL"))
+            upgrade_database(connection)
+        with self.engine.connect() as connection:
+            self.assertIsNotNone(connection.scalar(sa.text("SELECT created_at FROM conversations")))
+        self.assert_at_head()
+
+    def test_downgrade_to_baseline_preserves_preexisting_rows(self) -> None:
+        self.seed_legacy_database()
+        original_rows = self.legacy_rows()
+        with self.engine.begin() as connection:
+            upgrade_database(connection)
+            command.downgrade(self.migration_config(connection), BASELINE_REVISION)
+        self.assertEqual(self.legacy_rows(), original_rows)
+        with self.engine.begin() as connection:
+            upgrade_database(connection)
+        self.assert_at_head()
+
     def test_partial_legacy_schema_is_rejected_without_creating_missing_tables(self) -> None:
         with self.engine.begin() as connection:
-            Base.metadata.tables["conversations"].create(connection)
+            LEGACY_METADATA.tables["conversations"].create(connection)
         with self.assertRaisesRegex(CommandError, "does not match baseline"):
             with self.engine.begin() as connection:
                 upgrade_database(connection)
@@ -194,7 +253,14 @@ class MigrationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for arguments in [("upgrade", "head"), ("check",)]:
                 completed = subprocess.run(
-                    [sys.executable, "-m", "alembic", "-c", str(PROJECT_ROOT / "alembic.ini"), *arguments],
+                    [
+                        sys.executable,
+                        "-m",
+                        "alembic",
+                        "-c",
+                        str(PROJECT_ROOT / "alembic.ini"),
+                        *arguments,
+                    ],
                     cwd=directory,
                     env=environment,
                     capture_output=True,

@@ -270,7 +270,11 @@ class ApiFoundationTests(unittest.TestCase):
         install_api_foundation(app)
         with TestClient(app) as client:
             schema = client.get("/api/v1/openapi.json").json()
-            self.assertEqual(schema["paths"], {})
+            self.assertIn("/conversations", schema["paths"])
+            self.assertIn("/conversations/{conversation_id}/messages", schema["paths"])
+            self.assertFalse(
+                any("submissions" in path or "runs" in path for path in schema["paths"])
+            )
             self.assertEqual(client.get("/openapi.json").json()["paths"], {})
 
 
