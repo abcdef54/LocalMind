@@ -23,4 +23,10 @@ src/backend/ai/llms/cpp_models/
 .test_temp_db.sqlite
 
 LICENSE
-*.md
+*.md
+# Keep migration configuration and revision scripts in the backend build.
+!alembic.ini
+!src/backend/database/migrations/
+!src/backend/database/migrations/**
+**/__pycache__/
+**/*.pyc

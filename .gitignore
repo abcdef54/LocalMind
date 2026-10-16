@@ -127,6 +127,7 @@ $RECYCLE.BIN/
 *.log
 
 tests/
+!src/backend/database/tests/
 
 *.gguf
 

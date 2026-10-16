@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.backend.constants import DEFAULT_MODEL_REPO_ID, DEFAULT_MODEL_GGUF_FILE
-from src.backend.database.session import create_db_and_table, async_session_maker
+from src.backend.database.session import upgrade_database_schema, async_session_maker
 from src.backend.routes import chat_router, conversation_router, uploads_router, models_router
 from src.backend.routes.dependencies import get_model_manager, get_vector_db, get_ai
 from src.backend.services.model_services import ModelService
@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
     print()
 
     print("[INFO] Initializing Database...")
-    await create_db_and_table()
+    await upgrade_database_schema()
     print("[INFO] Database initialized.")
     print()
 

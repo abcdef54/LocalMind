@@ -121,6 +121,10 @@ To run the backend and frontend services directly on your host machine without D
 
 ## Development Journey
 
+Database schema changes now use Alembic. Backend startup applies pending migrations;
+see [database migration instructions](src/backend/database/migrations/README.md)
+for existing-database backups, baseline adoption, CLI commands, and integration tests.
+
 LocalMind has evolved through several major architectural generations.
 
 #### LocalMind v1.0 — The Prototype

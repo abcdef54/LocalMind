@@ -11,6 +11,11 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d localmind_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   llama-swap:
     image: ghcr.io/mostlygeek/llama-swap:cuda
@@ -50,8 +55,10 @@ services:
       - ./.uploads:/app/.uploads
       - ./llama_swap_config.yaml:/app/llama_swap_config.yaml
     depends_on:
-      - db
-      - llama-swap
+      db:
+        condition: service_healthy
+      llama-swap:
+        condition: service_started
 
   frontend:
     build:
