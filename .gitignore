@@ -78,6 +78,7 @@ chromadb/
 **/chroma_db/
 **/chroma/
 **/uploads/
+!src/backend/uploads/
 .uploads/
 **/.uploads/
 

@@ -1,4 +1,4 @@
-"""Opaque keyset cursors, scoped to a resource and conversation."""
+"""Encode and check the timestamp/ID used to request the next older page."""
 
 import base64
 import binascii
@@ -12,6 +12,13 @@ from src.backend.api.errors import ApiError
 
 
 class HistoryCursor(BaseModel):
+    """Store where a conversation or message page should continue.
+
+    created_at and id identify the oldest item already returned. resource prevents
+    using a conversation-list cursor for messages; conversation_id restricts message
+    cursors to one chat. This contains pagination data, not access permission.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[1] = 1
@@ -23,12 +30,22 @@ class HistoryCursor(BaseModel):
     @field_validator("created_at")
     @classmethod
     def require_timezone(cls, timestamp: datetime) -> datetime:
+        """Return the supplied timestamp converted to UTC.
+
+        Raise ValueError if it has no timezone, since a cursor must identify the same
+        point in time on every request. Do not change the represented instant.
+        """
         if timestamp.tzinfo is None:
             raise ValueError("Cursor timestamp must include a timezone")
         return timestamp.astimezone(timezone.utc)
 
 
 def encode_cursor(cursor: HistoryCursor) -> str:
+    """Return the cursor's JSON as URL-safe base64 text without padding.
+
+    cursor must already be validated. The result is suitable for a before query
+    parameter, but it is not encrypted, signed or an authorization token.
+    """
     return base64.urlsafe_b64encode(cursor.model_dump_json().encode()).decode().rstrip("=")
 
 
@@ -38,10 +55,13 @@ def decode_cursor(
     resource: Literal["conversations", "messages"],
     conversation_id: UUID | None = None,
 ) -> HistoryCursor:
-    """Validate scope without requiring the anchor row to still exist.
+    """Read a before token and verify it belongs to the requested list/chat.
 
-    Cursors are not credentials or signatures. All resource access checks remain
-    server-side, even when a client constructs its own valid cursor.
+    token is base64 JSON; resource must match conversations or messages, and
+    conversation_id must match the expected chat (None for the conversation list).
+    Return HistoryCursor, or raise ApiError 422 INVALID_CURSOR for malformed or
+    mismatched data. The original row may have been deleted; no DB lookup is needed.
+    The caller must still check permission to access the requested conversation.
     """
     try:
         if not token or len(token) > 1024:

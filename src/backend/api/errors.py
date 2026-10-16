@@ -1,4 +1,4 @@
-"""Public API v1 errors; legacy FastAPI exception handlers remain unchanged."""
+"""Return consistent JSON errors for v1 routes without exposing private exception text."""
 
 from http import HTTPStatus
 import logging
@@ -12,7 +12,6 @@ from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
 from src.backend.api.request_context import REQUEST_ID_HEADER
-
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -35,6 +34,12 @@ HTTP_ERROR_CODES = {
 
 
 class ErrorDetail(BaseModel):
+    """Describe a public API failure with a code, message and request ID.
+
+    details may contain safe field-level information, never file contents, credentials
+    or raw database exceptions. The request ID lets the user match an error to logs.
+    """
+
     code: str
     message: str
     request_id: str
@@ -42,14 +47,18 @@ class ErrorDetail(BaseModel):
 
 
 class ErrorResponse(BaseModel):
+    """Wrap one ErrorDetail under the error key used by every v1 failure response."""
+
     error: ErrorDetail
 
 
 class ApiError(Exception):
-    """Represent an intentional client-facing failure with JSON-safe public details.
+    """Tell the v1 error handler which safe HTTP error to return.
 
-    Callers must not include credentials, raw database errors or file contents.
-    Unexpected exceptions are handled separately with a generic 500 message.
+    status_code sets the HTTP status; code is a stable error identifier; message is
+    text the user may see. details and headers are optional response additions.
+    Constructing/raising this exception does not send a response by itself. Never
+    put credentials, raw SQL errors or uploaded contents in its public fields.
     """
 
     def __init__(
@@ -60,6 +69,11 @@ class ApiError(Exception):
         details: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
+        """Store the requested status, public code/message, optional details and headers.
+
+        Default details to an empty dictionary. The registered handler serializes these
+        values when the exception reaches the v1 application.
+        """
         super().__init__(message)
         self.status_code = status_code
         self.code = code
@@ -77,6 +91,12 @@ def error_response(
     details: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
+    """Build a JSON error response and include its request ID in body and headers.
+
+    request supplies the middleware's request ID, or a new UUID is generated if missing.
+    status_code, code and message describe the public failure; details and headers
+    are copied into the response. Return JSONResponse without logging body content.
+    """
     request_id = getattr(request.state, "request_id", None) or str(uuid4())
     payload = ErrorResponse(
         error=ErrorDetail(
@@ -97,6 +117,11 @@ def error_response(
 
 
 async def handle_api_error(request: Request, exception: ApiError) -> JSONResponse:
+    """Convert an ApiError into JSON using its public status, details and headers.
+
+    request supplies the request ID. Return the shared error response; do not expose
+    any exception fields beyond the explicitly provided public values.
+    """
     return error_response(
         request,
         status_code=exception.status_code,
@@ -108,6 +133,11 @@ async def handle_api_error(request: Request, exception: ApiError) -> JSONRespons
 
 
 async def handle_http_error(request: Request, exception: HTTPException) -> JSONResponse:
+    """Convert a framework HTTPException into the v1 JSON error format.
+
+    Preserve its status and headers. Use string details only for statuses below 500;
+    for server errors return the standard HTTP phrase instead of private exception text.
+    """
     status_code = exception.status_code
     try:
         message = HTTPStatus(status_code).phrase
@@ -129,6 +159,12 @@ async def handle_validation_error(
 ) -> JSONResponse:
     # Pydantic's raw errors include input/body and exception objects in ctx.
     # Return only field locations and messages, including for malformed JSON/NaN.
+    """Return HTTP 422 with the invalid field locations, codes and validation messages.
+
+    request supplies the request ID and exception supplies validation failures.
+    Omit raw input and exception context because they can contain submitted text,
+    file data or non-serializable objects. Return the shared JSON error format.
+    """
     violations = [
         {"location": list(error["loc"]), "code": error["type"], "message": error["msg"]}
         for error in exception.errors()
@@ -143,6 +179,11 @@ async def handle_validation_error(
 
 
 async def handle_unexpected_error(request: Request, exception: Exception) -> JSONResponse:
+    """Log an unexpected exception's type and return a generic HTTP 500 response.
+
+    Use the request ID for log matching. Do not log the raw exception text or copy
+    it into the response, where it could reveal credentials or user contents.
+    """
     logger.error(
         "Unhandled API error request_id=%s exception_type=%s",
         getattr(request.state, "request_id", "unknown"),
@@ -157,7 +198,11 @@ async def handle_unexpected_error(request: Request, exception: Exception) -> JSO
 
 
 def install_error_handlers(app: FastAPI) -> None:
-    """Install only on the v1 sub-application, not the legacy root application."""
+    """Register public, HTTP, validation and unexpected-error handlers on the given app.
+
+    Call with the v1 sub-application so existing root routes retain their old error
+    format. Return None; no requests are handled until the application receives them.
+    """
     app.add_exception_handler(ApiError, handle_api_error)
     app.add_exception_handler(HTTPException, handle_http_error)
     app.add_exception_handler(RequestValidationError, handle_validation_error)

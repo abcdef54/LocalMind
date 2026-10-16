@@ -133,3 +133,16 @@ drift rejection, downgrade/re-upgrade, async CLI and offline SQL generation.
 Submission/run tests also check concurrent writes, idempotency uniqueness,
 active-run admission constraints, result ownership and invalid snapshots/states.
 Run this suite sequentially with API integration tests when using the same DB.
+
+## Attachment lifecycle (0004)
+
+Revision `0004_submission_attachments` adds nullable submission/message/client/storage
+identities and constrained lifecycle state to attachments. Legacy citation links and
+paths remain intact; old files default to ready and old tombstones become deleted.
+New file links must match the user message submission/conversation. A partial unique
+index protects live filenames for new submission attachments without rewriting old
+duplicates. The submission service also checks existing legacy filenames.
+
+Downgrading to 0003 drops these new links and states, so it does not preserve new
+upload history. Physical files are not removed by schema downgrades. See the
+[upload guide](../../uploads/README.md) for limits and orphan reconciliation.

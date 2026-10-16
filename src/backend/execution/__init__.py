@@ -1,1 +1,1 @@
-"""Durable run execution, independent of HTTP routes and model implementations."""
+"""Run queued AI jobs using PostgreSQL records; model calls are supplied by a handler."""

@@ -1,4 +1,4 @@
-"""Conversation HTTP integration tests against an explicitly disposable PostgreSQL DB."""
+"""Check conversation routes and page queries using only a disposable PostgreSQL database."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -23,8 +23,15 @@ TEST_URL = os.getenv("LOCALMIND_MIGRATION_TEST_URL")
 
 @unittest.skipUnless(TEST_URL, "LOCALMIND_MIGRATION_TEST_URL is not configured")
 class ConversationApiTests(unittest.TestCase):
+    """Verify chat CRUD, bounded history pages, deleted records and conversation isolation."""
+
     @classmethod
     def setUpClass(cls) -> None:
+        """Open the disposable test database, rejecting any other database name.
+
+        Require localmind_migration_tests because individual cases drop its public schema.
+        Create a synchronous engine for fixtures; never use the application's database.
+        """
         url = make_url(TEST_URL)
         if url.database != "localmind_migration_tests":
             raise RuntimeError("Tests require disposable database localmind_migration_tests")
@@ -32,9 +39,15 @@ class ConversationApiTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        """Dispose the synchronous fixture engine after all cases finish."""
         cls.engine.dispose()
 
     def setUp(self) -> None:
+        """Recreate the disposable schema and give the HTTP client test-only sessions.
+
+        Capture SQL for pagination assertions. Close the client/engine after the case;
+        no AI startup or model download runs.
+        """
         with self.engine.begin() as connection:
             connection.execute(sa.text("DROP SCHEMA public CASCADE"))
             connection.execute(sa.text("CREATE SCHEMA public"))
@@ -45,9 +58,13 @@ class ConversationApiTests(unittest.TestCase):
 
         @sa.event.listens_for(self.async_engine.sync_engine, "before_cursor_execute")
         def capture_queries(connection, cursor, statement, parameters, context, executemany):
+            """Record SQL text and parameters so the case can check LIMIT and unwanted full-table
+            counts.
+            """
             self.queries.append((statement, parameters))
 
         async def session_dependency():
+            """Yield a disposable-DB session in place of the production route dependency."""
             async with self.sessions() as session:
                 yield session
 
@@ -59,6 +76,7 @@ class ConversationApiTests(unittest.TestCase):
         self.addCleanup(lambda: asyncio.run(self.async_engine.dispose()))
 
     def seed_conversation(self, *, conversation_id: UUID | None = None) -> UUID:
+        """Insert a chat with the optional UUID and a fixed creation time; return its UUID."""
         conversation_id = conversation_id or uuid4()
         with self.engine.begin() as connection:
             connection.execute(
@@ -71,6 +89,10 @@ class ConversationApiTests(unittest.TestCase):
         return conversation_id
 
     def seed_messages(self, conversation_id: UUID, count: int) -> None:
+        """Insert count user messages into conversation_id with equal timestamps.
+
+        Give them ascending integer-derived UUIDs so page ordering can be checked exactly.
+        """
         with self.engine.begin() as connection:
             connection.execute(
                 sa.insert(Message),
@@ -87,9 +109,11 @@ class ConversationApiTests(unittest.TestCase):
             )
 
     def history_url(self, conversation_id: UUID) -> str:
+        """Return the v1 message-list URL for the supplied conversation UUID."""
         return f"/api/v1/conversations/{conversation_id}/messages"
 
     def test_create_read_rename_and_archive_conversation(self) -> None:
+        """Check that a saved chat can be read/renamed and becomes invisible after deletion."""
         response = self.client.post("/api/v1/conversations", json={"title": "  Research  "})
         self.assertEqual(response.status_code, 201, response.text)
         conversation_id = response.json()["id"]
@@ -108,6 +132,9 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/conversations").json()["items"], [])
 
     def test_large_history_pages_use_sql_limit_and_stable_timestamp_tiebreaker(self) -> None:
+        """Load 1,005 tied-timestamp messages across 21 pages without duplicates or unbounded
+        SQL.
+        """
         conversation_id = self.seed_conversation()
         self.seed_messages(conversation_id, 1005)
         response = self.client.get(self.history_url(conversation_id))
@@ -147,6 +174,9 @@ class ConversationApiTests(unittest.TestCase):
         self.assertFalse(any("count(" in statement.lower() for statement, _ in self.queries))
 
     def test_cursor_survives_new_insert_and_deleted_anchor(self) -> None:
+        """Check that a new message or removal of the previous page anchor does not shift older
+        pages.
+        """
         conversation_id = self.seed_conversation()
         self.seed_messages(conversation_id, 120)
         first = self.client.get(self.history_url(conversation_id)).json()
@@ -170,6 +200,9 @@ class ConversationApiTests(unittest.TestCase):
         )
 
     def test_invalid_cursor_scope_limits_and_missing_conversations(self) -> None:
+        """Reject cross-chat/malformed cursors, invalid page sizes and nonexistent conversation
+        IDs.
+        """
         conversation_id = self.seed_conversation()
         other_id = self.seed_conversation()
         self.seed_messages(conversation_id, 51)
@@ -195,6 +228,9 @@ class ConversationApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/conversations/not-a-uuid").status_code, 422)
 
     def test_empty_history_and_conversation_title_validation(self) -> None:
+        """Return an empty page for a new chat and reject empty, oversized or unexpected title
+        fields.
+        """
         conversation_id = self.seed_conversation()
         self.assertEqual(
             self.client.get(self.history_url(conversation_id)).json(),
@@ -211,6 +247,9 @@ class ConversationApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 422)
 
     def test_conversation_list_pagination_is_scoped_separately(self) -> None:
+        """Page chats newest first and reject use of a conversation-list cursor for message
+        history.
+        """
         for index in range(1, 8):
             self.seed_conversation(conversation_id=UUID(int=index))
         first = self.client.get("/api/v1/conversations", params={"limit": 3}).json()
@@ -227,6 +266,9 @@ class ConversationApiTests(unittest.TestCase):
         )
 
     def test_history_filters_deleted_messages_and_cross_conversation_citations(self) -> None:
+        """Hide deleted messages and foreign-chat citations while keeping own deleted-file
+        markers.
+        """
         conversation_id = self.seed_conversation()
         other_id = self.seed_conversation()
         self.seed_messages(conversation_id, 3)
@@ -267,6 +309,7 @@ class ConversationApiTests(unittest.TestCase):
         self.assertNotIn("private/path", response.text)
 
     def test_active_run_blocks_conversation_deletion(self) -> None:
+        """Return 409 rather than hide a conversation whose recorded AI run is still active."""
         conversation_id = self.seed_conversation()
         submission_id, message_id = uuid4(), uuid4()
         with self.engine.begin() as connection:
@@ -304,6 +347,9 @@ class ConversationApiTests(unittest.TestCase):
         )
 
     def test_archive_hides_owned_metadata_but_preserves_other_conversations(self) -> None:
+        """Hide only the selected chat and its records while leaving files available for later
+        cleanup.
+        """
         conversation_id = self.seed_conversation()
         other_id = self.seed_conversation()
         self.seed_messages(conversation_id, 2)

@@ -1,7 +1,7 @@
-"""Integration tests against a disposable PostgreSQL database, never the app database.
+"""Check schema creation, adoption and downgrade on a disposable PostgreSQL database.
 
-Set LOCALMIND_MIGRATION_TEST_URL to an asyncpg URL whose database name is exactly
-localmind_migration_tests. Each test drops that database's public schema.
+Require LOCALMIND_MIGRATION_TEST_URL with database name localmind_migration_tests.
+Cases drop public schema; never configure this suite with valuable application data.
 """
 
 import asyncio
@@ -36,8 +36,15 @@ LEGACY_METADATA = MIGRATION_SCRIPTS.get_revision(BASELINE_REVISION).module.basel
 
 @unittest.skipUnless(TEST_DATABASE_URL, "LOCALMIND_MIGRATION_TEST_URL is not configured")
 class MigrationIntegrationTests(unittest.TestCase):
+    """Verify Alembic changes preserve old rows and reject mismatched existing schemas."""
+
     @classmethod
     def setUpClass(cls) -> None:
+        """Open the disposable test database, rejecting any other database name.
+
+        Require localmind_migration_tests because individual cases drop its public schema.
+        Create a synchronous engine for fixtures; never use the application's database.
+        """
         database_url = make_url(TEST_DATABASE_URL)
         if database_url.database != "localmind_migration_tests":
             raise RuntimeError("Migration tests require database localmind_migration_tests.")
@@ -45,23 +52,34 @@ class MigrationIntegrationTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        """Dispose the synchronous fixture engine after all cases finish."""
         cls.engine.dispose()
 
     def setUp(self) -> None:
+        """Reset the disposable database schema before each migration scenario."""
         self.reset_database()
 
     def reset_database(self) -> None:
+        """Drop and recreate public schema in the guarded test database; delete all its test
+        rows.
+        """
         with self.engine.begin() as connection:
             connection.execute(sa.text("DROP SCHEMA public CASCADE"))
             connection.execute(sa.text("CREATE SCHEMA public"))
 
     def migration_config(self, connection: sa.Connection) -> Config:
+        """Return Alembic configuration using the supplied fixture connection without resetting
+        loggers.
+        """
         config = Config(str(PROJECT_ROOT / "alembic.ini"))
         config.attributes["connection"] = connection
         config.attributes["configure_logger"] = False
         return config
 
     def assert_at_head(self) -> None:
+        """Assert the current revision is latest and inspected SQL schema matches ORM
+        definitions.
+        """
         with self.engine.connect() as connection:
             migration_context = MigrationContext.configure(connection)
             self.assertEqual(
@@ -73,12 +91,15 @@ class MigrationIntegrationTests(unittest.TestCase):
             )
 
     def assert_not_baselined(self) -> None:
+        """Assert Alembic has not recorded any revision after an invalid adoption attempt."""
         with self.engine.connect() as connection:
             migration_context = MigrationContext.configure(connection)
             self.assertIsNone(migration_context.get_current_revision())
 
     def seed_legacy_database(self) -> None:
-        """Emulate the old create_all startup, including rows and citation links."""
+        """Create original tables and sample chat/message/file/citation/model rows without
+        Alembic.
+        """
         with self.engine.begin() as connection:
             LEGACY_METADATA.create_all(connection)
             conversation_id = connection.execute(
@@ -137,6 +158,9 @@ class MigrationIntegrationTests(unittest.TestCase):
             )
 
     def legacy_rows(self) -> dict[str, list[tuple]]:
+        """Return sorted original-column rows for every baseline table so migrations can be
+        compared.
+        """
         with self.engine.connect() as connection:
             return {
                 table.name: list(
@@ -146,12 +170,16 @@ class MigrationIntegrationTests(unittest.TestCase):
             }
 
     def test_empty_database_upgrades_and_matches_orm_schema(self) -> None:
+        """Create the schema from empty and verify Alembic detects no remaining ORM differences."""
         with self.engine.begin() as connection:
             upgrade_database(connection)
             command.check(self.migration_config(connection))
         self.assert_at_head()
 
     def test_legacy_adoption_and_repeated_upgrade_preserve_all_rows(self) -> None:
+        """Adopt old tables and repeat upgrade without rewriting any original rows or citation
+        links.
+        """
         self.seed_legacy_database()
         original_rows = self.legacy_rows()
         for _ in range(2):
@@ -161,6 +189,9 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.legacy_rows(), original_rows)
 
     def test_versioned_baseline_upgrades_without_rewriting_legacy_data(self) -> None:
+        """Apply newer revisions to an already versioned baseline without changing original row
+        values.
+        """
         with self.engine.begin() as connection:
             command.upgrade(self.migration_config(connection), BASELINE_REVISION)
         self.seed_legacy_database()
@@ -177,6 +208,7 @@ class MigrationIntegrationTests(unittest.TestCase):
             self.assertIsNone(legacy_message["run_id"])
 
     def test_null_legacy_conversation_time_is_backfilled_before_cursor_indexing(self) -> None:
+        """Fill an unknown old creation time before requiring timestamps for cursor pagination."""
         self.seed_legacy_database()
         with self.engine.begin() as connection:
             connection.execute(sa.text("UPDATE conversations SET created_at = NULL"))
@@ -186,6 +218,7 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_at_head()
 
     def test_downgrade_to_baseline_preserves_preexisting_rows(self) -> None:
+        """Remove newer schema additions while keeping original records, then upgrade again."""
         self.seed_legacy_database()
         original_rows = self.legacy_rows()
         with self.engine.begin() as connection:
@@ -197,6 +230,9 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_at_head()
 
     def test_partial_legacy_schema_is_rejected_without_creating_missing_tables(self) -> None:
+        """Refuse adoption of an incomplete old schema instead of creating missing tables
+        silently.
+        """
         with self.engine.begin() as connection:
             LEGACY_METADATA.tables["conversations"].create(connection)
         with self.assertRaisesRegex(CommandError, "does not match baseline"):
@@ -207,6 +243,7 @@ class MigrationIntegrationTests(unittest.TestCase):
             self.assertEqual(sa.inspect(connection).get_table_names(), ["conversations"])
 
     def test_schema_drift_is_rejected_without_modifying_legacy_rows(self) -> None:
+        """Reject a changed old schema without recording a revision or rewriting its rows."""
         drift_statements = [
             "ALTER TABLE conversations ALTER COLUMN title TYPE varchar(100)",
             "ALTER TABLE conversations ALTER COLUMN title DROP NOT NULL",
@@ -231,6 +268,9 @@ class MigrationIntegrationTests(unittest.TestCase):
                 self.assertEqual(self.legacy_rows(), original_rows)
 
     def test_unrelated_table_is_not_silently_adopted(self) -> None:
+        """Reject an existing database containing an unexpected table instead of declaring it
+        compatible.
+        """
         with self.engine.begin() as connection:
             connection.execute(sa.text("CREATE TABLE other_application (id integer)"))
         with self.assertRaisesRegex(CommandError, "does not match baseline"):
@@ -239,6 +279,7 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_not_baselined()
 
     def test_downgrade_and_upgrade_on_disposable_database(self) -> None:
+        """Drop all application tables through downgrade and recreate them through upgrade."""
         with self.engine.begin() as connection:
             upgrade_database(connection)
             command.downgrade(self.migration_config(connection), "base")
@@ -249,6 +290,9 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_at_head()
 
     def test_async_cli_works_outside_project_directory(self) -> None:
+        """Run Alembic upgrade/check from another working directory using the explicit config
+        path.
+        """
         environment = {**os.environ, "POSTGRESQL_URL": TEST_DATABASE_URL}
         with tempfile.TemporaryDirectory() as directory:
             for arguments in [("upgrade", "head"), ("check",)]:
@@ -271,8 +315,15 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_at_head()
 
     def test_async_application_startup_uses_migrations(self) -> None:
+        """Call startup migration twice against a test engine and verify it reaches the latest
+        revision.
+        """
+
         async def initialize_test_database() -> None:
             # Importing this module creates an engine but does not connect to the app DB.
+            """Temporarily replace the startup engine with the disposable engine, upgrade twice,
+            then dispose it.
+            """
             from src.backend.database import session
 
             test_engine = create_async_engine(TEST_DATABASE_URL)
@@ -288,6 +339,7 @@ class MigrationIntegrationTests(unittest.TestCase):
         self.assert_at_head()
 
     def test_offline_sql_contains_frozen_schema(self) -> None:
+        """Generate creation SQL for every table without connecting or recording a DB revision."""
         environment = {**os.environ, "POSTGRESQL_URL": TEST_DATABASE_URL}
         completed = subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head", "--sql"],

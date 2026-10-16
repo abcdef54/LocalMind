@@ -133,6 +133,9 @@ The [durable run executor](src/backend/execution/README.md) documents PostgreSQL
 claims, leases, recovery and shutdown. Its AI handler is connected in the later
 LangGraph integration task; legacy chat behavior remains unchanged at this stage.
 
+The [submission upload guide](src/backend/uploads/README.md) describes multipart sends,
+filename duplicate checks, upload limits, storage cleanup and integration boundaries.
+
 LocalMind has evolved through several major architectural generations.
 
 #### LocalMind v1.0 — The Prototype

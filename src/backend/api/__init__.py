@@ -1,1 +1,1 @@
-"""Shared HTTP infrastructure, independent of database and AI initialization."""
+"""Provide v1 HTTP routes, JSON errors and request IDs without starting the AI."""

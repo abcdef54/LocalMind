@@ -1,4 +1,4 @@
-"""Conversation mutations and bounded history queries without AI dependencies."""
+"""Create, rename and hide conversations, and read their history one page at a time."""
 
 from datetime import datetime, timezone
 from uuid import UUID
@@ -11,6 +11,7 @@ from src.backend.api.errors import ApiError
 from src.backend.api.v1.pagination import HistoryCursor, decode_cursor, encode_cursor
 from src.backend.api.v1.schemas import (
     CitationResponse,
+    DocumentResponse,
     ConversationPage,
     ConversationResponse,
     MessagePage,
@@ -22,6 +23,12 @@ from src.backend.database.models import ACTIVE_RUN_STATUSES, Attachment, Convers
 async def get_conversation(
     session: AsyncSession, conversation_id: UUID, *, lock: bool = False
 ) -> Conversation:
+    """Return the non-deleted Conversation with the given UUID, or raise ApiError 404.
+
+    session supplies the database connection. With lock=True, lock the row until
+    the caller's transaction ends so sends, renames and deletion can be coordinated.
+    Do not commit or close the supplied session here.
+    """
     query = select(Conversation).where(
         Conversation.id == conversation_id, Conversation.deleted_at.is_(None)
     )
@@ -36,6 +43,13 @@ async def get_conversation(
 async def list_conversations(
     session: AsyncSession, limit: int, before: str | None
 ) -> ConversationPage:
+    """Read at most limit visible conversations, newest first, and return page metadata.
+
+    session supplies the read transaction. before is None for the first page or a
+    conversation cursor for an older page. Compare created_at and ID together so
+    equal timestamps remain ordered. Fetch one extra row to set has_more, without
+    counting/loading the full table. Raise ApiError 422 for an invalid cursor.
+    """
     query = select(Conversation).where(Conversation.deleted_at.is_(None))
     if before is not None:
         cursor = decode_cursor(before, resource="conversations")
@@ -60,6 +74,12 @@ async def list_conversations(
 
 
 async def create_conversation(session: AsyncSession, title: str) -> Conversation:
+    """Insert a conversation with the supplied title and return the saved ORM row.
+
+    session must have no open transaction. Commit the insert before returning;
+    propagate DB failures so the transaction rolls back. Title validation happens
+    in the API schema before this service is called.
+    """
     async with session.begin():
         conversation = Conversation(title=title)
         session.add(conversation)
@@ -71,6 +91,12 @@ async def create_conversation(session: AsyncSession, title: str) -> Conversation
 async def rename_conversation(
     session: AsyncSession, conversation_id: UUID, title: str
 ) -> Conversation:
+    """Lock a live conversation, update its title and commit the change.
+
+    Use conversation_id to select the row and title as the validated replacement.
+    Return the updated Conversation. Raise ApiError 404 if missing/deleted; propagate
+    database errors and roll back rather than returning an unsaved rename.
+    """
     async with session.begin():
         conversation = await get_conversation(session, conversation_id, lock=True)
         conversation.title = title
@@ -79,10 +105,12 @@ async def rename_conversation(
 
 
 async def delete_conversation(session: AsyncSession, conversation_id: UUID) -> None:
-    """Archive metadata atomically; physical document cleanup is added in BE-09.
+    """Hide a conversation and its messages/files by saving deletion timestamps.
 
-    Reject recorded active runs. Future run creation must lock/check the same
-    conversation. Retrieval scoping and blob/index cleanup are separate tasks.
+    session must have no open transaction. Lock conversation_id and reject recorded
+    active runs with ApiError 409. Raise 404 if the chat is missing/already deleted.
+    Commit metadata changes together and return None. Keep file bytes and vector
+    entries for the later document-deletion task; do not claim physical cleanup here.
     """
     async with session.begin():
         conversation = await get_conversation(session, conversation_id, lock=True)
@@ -101,16 +129,28 @@ async def delete_conversation(session: AsyncSession, conversation_id: UUID) -> N
         deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
         conversation.deleted_at = deleted_at
         for model in (Message, Attachment):
+            values = {"deleted_at": deleted_at}
+            if model is Attachment:
+                values["status"] = "deleted"
             await session.execute(
                 update(model)
                 .where(model.conversation_id == conversation_id, model.deleted_at.is_(None))
-                .values(deleted_at=deleted_at)
+                .values(**values)
             )
 
 
 async def list_messages(
     session: AsyncSession, conversation_id: UUID, limit: int, before: str | None
 ) -> MessagePage:
+    """Return a limited page of messages and their own conversation's file references.
+
+    session reads conversation_id after checking the chat is live. limit is the
+    validated page size; before is None or a message cursor for this same chat.
+    Select the newest eligible rows with limit+1, then return items oldest to newest
+    with has_more/next_cursor. Hide deleted messages but retain deleted-file markers.
+    Raise ApiError 404 for a missing chat or 422 for an invalid/cross-chat cursor.
+    This query does not load full history or determine the model's context window.
+    """
     await get_conversation(session, conversation_id)
     query = select(Message).where(
         Message.conversation_id == conversation_id, Message.deleted_at.is_(None)
@@ -122,7 +162,8 @@ async def list_messages(
         query = query.where(tuple_(Message.created_at, Message.id) < (anchor_time, cursor.id))
     query = (
         query.options(
-            selectinload(Message.citations.and_(Attachment.conversation_id == conversation_id))
+            selectinload(Message.citations.and_(Attachment.conversation_id == conversation_id)),
+            selectinload(Message.attachments.and_(Attachment.conversation_id == conversation_id)),
         )
         .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(limit + 1)
@@ -154,6 +195,18 @@ async def list_messages(
             created_at=message.created_at,
             submission_id=message.submission_id,
             run_id=message.run_id,
+            attachments=[
+                DocumentResponse(
+                    id=attachment.id,
+                    client_file_id=attachment.client_file_id,
+                    file_name=attachment.file_name,
+                    file_type=attachment.file_type,
+                    file_size=attachment.file_size,
+                    status=attachment.status,
+                    deleted=attachment.deleted_at is not None,
+                )
+                for attachment in message.attachments
+            ],
             citations=[
                 CitationResponse(
                     id=attachment.id,

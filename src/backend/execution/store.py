@@ -1,4 +1,10 @@
-"""Short PostgreSQL transactions for claims, lease fencing and result publication."""
+"""Read and update AI run records in PostgreSQL.
+
+A run is the work needed to produce one assistant reply. A worker must reserve
+that run before starting it. The reservation has an owner token, attempt number
+and expiry time; these are checked again before saving an answer. Database updates
+use short transactions, so model calls never keep a database lock open.
+"""
 
 from dataclasses import dataclass
 from datetime import timedelta
@@ -16,6 +22,14 @@ LEASED_STATUSES = ("running", "cancel_requested")
 
 @dataclass(frozen=True)
 class RunClaim:
+    """Store the IDs and permission token for one reserved AI run.
+
+    run_id identifies the work, message_id identifies the user message, and
+    settings_snapshot contains the settings saved when Send was pressed. lease_owner
+    and attempt identify this specific execution. Pass this object back to RunStore
+    when extending the reservation or saving a result; knowing run_id alone is not enough.
+    """
+
     run_id: UUID
     conversation_id: UUID
     submission_id: UUID
@@ -27,27 +41,46 @@ class RunClaim:
 
 @dataclass(frozen=True)
 class RunResult:
-    """Minimal handler output; LangGraph/citation integration is added in BE-10."""
+    """Carry the assistant text returned by a run handler.
+
+    content must be a nonempty string. Its original whitespace is preserved when
+    saved. Citations and other answer metadata will be connected in BE-10.
+    """
 
     content: str
 
     def __post_init__(self) -> None:
+        """Reject missing, non-string or whitespace-only assistant text with ValueError."""
         if not isinstance(self.content, str) or not self.content.strip():
             raise ValueError("RunResult requires non-empty assistant content")
 
 
 class RunStore:
+    """Save run status and assistant replies through short PostgreSQL transactions.
+
+    sessions is the async session factory used for every operation. Methods commit
+    successful changes when their transaction exits and propagate database errors.
+    They do not call the model or determine whether external compute has stopped.
+    """
+
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        """Save the session factory; do not open a database connection yet."""
         self.sessions = sessions
 
     async def claim_next(
         self, *, worker_id: str, lease_seconds: float, max_concurrency: int
     ) -> RunClaim | None:
-        """Claim ready queued work, admitting at most the shared concurrency limit.
+        """Reserve the oldest eligible queued run for this worker.
 
-        The advisory lock protects the short count-and-claim transaction across
-        executor instances. Row locks are never held while a handler is running.
-        Interrupted runs with an unresolved owner keep their slot occupied.
+        worker_id names the worker; lease_seconds is how long its reservation lasts;
+        max_concurrency limits occupied slots across executors sharing this database
+        and the same limit. Only ready submissions in live conversations are eligible.
+
+        Return a RunClaim after setting running, recording a new owner token and
+        incrementing attempt. Return None if another worker is reserving work, the
+        limit is reached, or no eligible row is available. Locked run rows are skipped.
+        Interrupted runs still occupy a slot until compute stoppage is confirmed.
+        Raise ValueError for invalid worker ID or nonpositive limits.
         """
         if not worker_id or len(worker_id) > 64:
             raise ValueError("worker_id must have 1–64 characters")
@@ -103,6 +136,12 @@ class RunStore:
 
     @staticmethod
     def _owned_lease(claim: RunClaim):
+        """Build the SQL conditions that identify a claim still allowed to update its run.
+
+        The run ID, owner token and attempt must match. The run must still be running
+        or cancel_requested, and its expiry must be later than PostgreSQL's current time.
+        Return a SQL expression; this function does not query or change the database.
+        """
         return and_(
             Run.id == claim.run_id,
             Run.lease_owner == claim.lease_owner,
@@ -114,7 +153,14 @@ class RunStore:
     async def heartbeat(
         self, claim: RunClaim, *, lease_seconds: float
     ) -> Literal["active", "cancel_requested", "lost"]:
-        """An expired lease cannot be revived, even by its former owner."""
+        """Extend the claim's reservation and report whether the worker should continue.
+
+        claim identifies the current execution; lease_seconds sets the new duration
+        from PostgreSQL's current time. Return active after a valid renewal,
+        cancel_requested if cancellation was recorded, or lost if ownership/status/expiry
+        no longer matches. Expired reservations are never renewed. Changes are committed
+        before return; the method itself does not cancel model computation.
+        """
         async with self.sessions.begin() as session:
             heartbeat = (
                 await session.execute(
@@ -134,10 +180,13 @@ class RunStore:
             return "active"
 
     async def complete(self, claim: RunClaim, result: RunResult) -> bool:
-        """Publish exactly one assistant result atomically with run completion.
+        """Save one assistant reply and mark its run completed in the same transaction.
 
-        A stale handler may still finish computing, but cannot write a result
-        after ownership/lease loss. Full answer metadata/citations are BE-10 work.
+        claim identifies the execution and result contains its answer text. Save only
+        while the claim is unexpired, the run is running, and cancellation is not set.
+        Return True after inserting the assistant message, linking it to the run and
+        releasing the execution slot. Return False without saving an answer when those
+        checks fail. A late or repeated handler result cannot create another reply.
         """
         async with self.sessions.begin() as session:
             run = await session.scalar(
@@ -168,7 +217,13 @@ class RunStore:
             return True
 
     async def fail(self, claim: RunClaim) -> bool:
-        """Record a returned handler failure; no automatic inference retry."""
+        """Mark the claim's run failed and release its slot after a confirmed handler failure.
+
+        Call only when the handler has stopped its compute. Return True if the claim
+        still owns an unexpired running run with no cancellation request; otherwise
+        return False and leave it unchanged. Save a generic HANDLER_FAILED error,
+        never the raw exception or user content. Do not queue an automatic retry.
+        """
         async with self.sessions.begin() as session:
             failed = await session.scalar(
                 update(Run)
@@ -190,7 +245,15 @@ class RunStore:
             return failed is not None
 
     async def interrupt(self, claim: RunClaim, *, code: str) -> bool:
-        """Fence writes but retain the occupied slot until compute stoppage is confirmed."""
+        """Mark this execution interrupted while keeping its slot occupied.
+
+        claim supplies the owner token and attempt; code is the public error code to
+        record. Return True if a matching running/cancel_requested run was updated,
+        or False if it has already changed. An expired claim can still be interrupted.
+
+        This stops later results from being saved. It does not stop the model or prove
+        compute ended, so the owner token and expiry are deliberately kept.
+        """
         async with self.sessions.begin() as session:
             interrupted = await session.scalar(
                 update(Run)
@@ -214,7 +277,13 @@ class RunStore:
             return interrupted is not None
 
     async def recover_expired_leases(self) -> int:
-        """Mark expired/orphaned execution interrupted, never queued for an implicit retry."""
+        """Mark running jobs interrupted when their reservation expired or has no expiry.
+
+        Check PostgreSQL's time and skip rows another transaction has locked. Keep each
+        run's owner token, assigning an orphan marker if missing, so its slot stays
+        occupied. Return the number of runs updated and commit those changes together.
+        Do not rerun the model or assume a crashed worker's compute has stopped.
+        """
         async with self.sessions.begin() as session:
             expired = list(
                 (
@@ -243,11 +312,14 @@ class RunStore:
             return len(expired)
 
     async def acknowledge_interruption(self, run_id: UUID, *, expected_owner: str) -> bool:
-        """Release an interrupted slot only AFTER the caller confirms compute has stopped.
+        """Release an interrupted run's slot after the caller confirms compute has stopped.
 
-        This operator/adapter primitive is not an HTTP endpoint and does not
-        requeue the interrupted run. Checking the expected owner prevents stale
-        acknowledgements from clearing a newer execution's slot.
+        run_id identifies the run; expected_owner must match its saved owner token.
+        Return True after clearing the owner and expiry, or False if status/owner no
+        longer matches. Keep the run interrupted; do not retry it or change its answer.
+
+        This method performs no compute check itself. The operator or inference adapter
+        must confirm stoppage first. It is not exposed as an HTTP endpoint.
         """
         async with self.sessions.begin() as session:
             released = await session.scalar(

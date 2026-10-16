@@ -1,1 +1,1 @@
-"""Versioned API contracts and routes."""
+"""Define request/response fields and register the /api/v1 routes."""

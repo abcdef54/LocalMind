@@ -1,7 +1,10 @@
-"""Add durable submission/run identities without changing legacy message ownership.
+"""Add records for user sends and AI runs, linked to their messages.
 
 Revision ID: 0003_submissions_runs
 Revises: 0002_history_pagination
+
+Keep old messages valid with empty submission/run links. Database constraints
+prevent duplicate sends, cross-conversation links and multiple active runs per chat.
 """
 
 from alembic import op
@@ -15,6 +18,12 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Create submissions/runs and add optional links to existing messages.
+
+    Add uniqueness, status and ownership constraints so a send has at most one user
+    message/run and a run can finish only with its own assistant reply. Existing
+    message rows keep NULL links. This does not execute jobs or upload files.
+    """
     op.create_table(
         "submissions",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -152,6 +161,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Drop submission/run tables and remove their message links and constraints.
+
+    Keep the original message/conversation/attachment rows. New send/run history is
+    lost; upgrading again cannot reconstruct those removed links or records.
+    """
     op.drop_constraint("fk_messages_run_conversation", "messages", type_="foreignkey")
     op.drop_table("runs")
     op.drop_constraint("fk_messages_submission_conversation", "messages", type_="foreignkey")

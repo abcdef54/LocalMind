@@ -1,10 +1,10 @@
-"""Create the original schema or adopt a matching legacy database without rewriting data.
+"""Create the original five tables or register an existing database that matches them.
 
 Revision ID: 0001_existing_schema
 Revises: None
 
-This metadata is a frozen DDL snapshot, deliberately independent of ORM models.
-Future model changes must be expressed in new revisions, not added to this file.
+The table definitions below describe the original schema and must stay unchanged
+when later features add columns. Add those changes in a new revision instead.
 """
 
 from alembic import op
@@ -15,7 +15,6 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Connection
 
-
 revision = "0001_existing_schema"
 down_revision = None
 branch_labels = None
@@ -23,7 +22,12 @@ depends_on = None
 
 
 def baseline_metadata() -> sa.MetaData:
-    """Describe only server-side schema; Python ORM defaults are not SQL defaults."""
+    """Return SQLAlchemy table definitions for the original five database tables.
+
+    Build a separate MetaData object without creating tables or importing current ORM
+    models. Include SQL defaults only; Python defaults such as UUID generation are
+    not database defaults. Later model changes must not change this baseline.
+    """
     metadata = sa.MetaData()
     sa.Table(
         "conversations",
@@ -109,7 +113,13 @@ def baseline_metadata() -> sa.MetaData:
 
 
 def validate_legacy_schema(connection: Connection, metadata: sa.MetaData) -> None:
-    """Reject partial/drifted schemas before Alembic records the baseline revision."""
+    """Check that an existing database matches the supplied baseline table definitions.
+
+    connection is the open database connection; metadata is the original schema.
+    Compare tables, columns, types, defaults and primary keys. Return None on a match.
+    Raise CommandError if anything differs, before recording a baseline revision.
+    Do not create tables, rewrite rows or silently mark a mismatched schema valid.
+    """
     migration_context = MigrationContext.configure(
         connection,
         opts={"compare_type": True, "compare_server_default": True},
@@ -140,6 +150,12 @@ def validate_legacy_schema(connection: Connection, metadata: sa.MetaData) -> Non
 
 
 def upgrade() -> None:
+    """Create baseline tables if empty, or validate existing tables before adoption.
+
+    When generating offline SQL, emit table creation only. Online, reject partial,
+    changed or extra application tables through validate_legacy_schema. Existing rows
+    are left intact; Alembic records the revision only after this function succeeds.
+    """
     metadata = baseline_metadata()
     connection = op.get_bind()
 
@@ -156,5 +172,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop baseline tables and their data, including when originally adopted from legacy."""
+    """Drop the five baseline tables and all rows they contain.
+
+    This also deletes data from databases originally adopted from the old app.
+    Use a backup to recover it; upgrading again recreates tables, not lost rows.
+    """
     baseline_metadata().drop_all(op.get_bind(), checkfirst=False)

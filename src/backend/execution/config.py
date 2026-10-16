@@ -1,4 +1,4 @@
-"""Validated operational limits for the in-process executor."""
+"""Read and validate limits for polling, running and stopping AI jobs."""
 
 from dataclasses import dataclass
 import math
@@ -7,6 +7,15 @@ import os
 
 @dataclass(frozen=True)
 class ExecutorSettings:
+    """Set how many AI jobs can run and how long executor operations may wait.
+
+    max_concurrency is the occupied-slot limit shared by workers using the same DB
+    and limit. poll_seconds is the queue-check interval. lease_seconds is a run
+    reservation's lifetime; heartbeat_seconds is its renewal interval.
+    shutdown_grace_seconds allows active handlers to finish before cancellation.
+    database_timeout_seconds limits each awaited store call. All times are seconds.
+    """
+
     max_concurrency: int = 1
     poll_seconds: float = 1.0
     lease_seconds: float = 30.0
@@ -15,6 +24,11 @@ class ExecutorSettings:
     database_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
+        """Reject invalid counts/times and reservation settings that cannot renew in time.
+
+        Raise ValueError for a nonpositive/noninteger concurrency, nonfinite or
+        nonpositive time, or heartbeat interval plus DB timeout reaching the lease duration.
+        """
         if type(self.max_concurrency) is not int or self.max_concurrency < 1:
             raise ValueError("Executor max_concurrency must be a positive integer")
         for name in (
@@ -34,6 +48,12 @@ class ExecutorSettings:
 
     @classmethod
     def from_environment(cls) -> "ExecutorSettings":
+        """Read RUN_EXECUTOR_* environment variables and return validated settings.
+
+        Parse MAX_CONCURRENCY as int and each *_SECONDS value as float. Missing values
+        use the defaults shown in this method. Raise ValueError for invalid numbers or
+        unsafe timing settings. No worker or database connection is started here.
+        """
         prefix = "RUN_EXECUTOR_"
         return cls(
             max_concurrency=int(os.getenv(prefix + "MAX_CONCURRENCY", "1")),

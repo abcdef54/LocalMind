@@ -1,1 +1,1 @@
-"""Tests for durable execution without invoking an LLM."""
+"""Check executor behavior with fake handlers instead of model inference."""

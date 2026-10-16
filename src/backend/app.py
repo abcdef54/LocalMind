@@ -9,6 +9,8 @@ from src.backend.database.session import upgrade_database_schema, async_session_
 from src.backend.execution.config import ExecutorSettings
 from src.backend.execution.store import RunStore
 from src.backend.execution.worker import RunExecutor
+from src.backend.uploads.config import UploadSettings
+from src.backend.uploads.storage import remove_orphaned_upload_batches
 from src.backend.routes import chat_router, conversation_router, uploads_router, models_router
 from src.backend.routes.dependencies import get_model_manager, get_vector_db, get_ai
 from src.backend.services.model_services import ModelService
@@ -17,7 +19,16 @@ from src.backend.ai.llms.huggingface import path as cpp_models_dir
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Prepare the database, upload storage, models and run executor before serving requests.
+
+    app is the root FastAPI application. Apply migrations, remove old uncommitted
+    upload batches, synchronize local models and initialize AI dependencies. Start
+    the executor without an AI handler at this stage; queued jobs remain queued.
+    Yield when startup finishes and always stop the executor when serving ends.
+    Migration/setup errors propagate; model synchronization errors are logged.
+    """
     executor_settings = ExecutorSettings.from_environment()
+    upload_settings = UploadSettings.from_environment()
     print()
     print("=" * 60)
     print()
@@ -28,6 +39,10 @@ async def lifespan(app: FastAPI):
 
     print("[INFO] Initializing Database...")
     await upgrade_database_schema()
+    async with async_session_maker() as session:
+        await remove_orphaned_upload_batches(
+            session, upload_settings.root, upload_settings.orphan_grace_seconds
+        )
     print("[INFO] Database initialized.")
     print()
 

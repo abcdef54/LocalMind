@@ -167,3 +167,10 @@ Without that variable the database tests skip. Run API/database suites
 sequentially when sharing one test database; do not run them concurrently.
 
 The test client uses HTTPX, already available in the current AI dependency stack.
+
+## Submission uploads
+
+The multipart send and client-key lookup contracts are documented in
+[the upload guide](../uploads/README.md). File acceptance is implemented; indexing
+and AI integration follow in BE-08/BE-10. User attachments are separate from citations
+in the paginated message response.

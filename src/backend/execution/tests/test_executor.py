@@ -1,4 +1,4 @@
-"""Real PostgreSQL lease/concurrency tests; handlers never call a model."""
+"""Check worker reservations, restart and shutdown with real PostgreSQL and fake AI handlers."""
 
 import asyncio
 from dataclasses import replace
@@ -31,8 +31,15 @@ FAST_SETTINGS = ExecutorSettings(
 
 @unittest.skipUnless(TEST_URL, "LOCALMIND_MIGRATION_TEST_URL is not configured")
 class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Verify queued work and late results without making any model or GPU calls."""
+
     @classmethod
     def setUpClass(cls) -> None:
+        """Open the disposable test database, rejecting any other database name.
+
+        Require localmind_migration_tests because individual cases drop its public schema.
+        Create a synchronous engine for fixtures; never use the application's database.
+        """
         url = make_url(TEST_URL)
         if url.database != "localmind_migration_tests":
             raise RuntimeError("Tests require disposable database localmind_migration_tests")
@@ -40,9 +47,13 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        """Dispose the synchronous fixture engine after all cases finish."""
         cls.engine.dispose()
 
     async def asyncSetUp(self) -> None:
+        """Recreate the disposable schema and prepare a run store plus executors to clean up
+        after the case.
+        """
         with self.engine.begin() as connection:
             connection.execute(sa.text("DROP SCHEMA public CASCADE"))
             connection.execute(sa.text("CREATE SCHEMA public"))
@@ -53,11 +64,17 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.executors = []
 
     async def asyncTearDown(self) -> None:
+        """Stop every executor started by the case and dispose its async test engine."""
         for executor in self.executors:
             await executor.stop()
         await self.async_engine.dispose()
 
     def seed_run(self, *, status="queued", submission_status="ready", archived=False):
+        """Insert a chat, send, user message and run; return the run UUID.
+
+        status/submission_status choose eligibility and archived hides the fixture chat.
+        Use only the disposable DB and never invoke a model.
+        """
         with self.engine.begin() as connection:
             conversation_id = connection.execute(
                 sa.insert(Conversation).values(
@@ -93,6 +110,7 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ).inserted_primary_key[0]
 
     async def run_row(self, run_id):
+        """Read the supplied run UUID as a mapping so the case can inspect its stored state."""
         async with self.sessions() as session:
             return (
                 (await session.execute(sa.select(Run.__table__).where(Run.id == run_id)))
@@ -101,7 +119,12 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def wait_status(self, run_id, status):
+        """Poll run_id until it reaches status, returning its row or raising TimeoutError after
+        four seconds.
+        """
+
         async def poll():
+            """Read the fixture run every 20 milliseconds and return once its status matches."""
             while True:
                 row = await self.run_row(run_id)
                 if row["status"] == status:
@@ -111,9 +134,15 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         return await asyncio.wait_for(poll(), timeout=4)
 
     async def claim(self, worker="worker", limit=1):
+        """Reserve one fixture job for worker with a two-second lease and the supplied
+        concurrency limit.
+        """
         return await self.store.claim_next(worker_id=worker, lease_seconds=2, max_concurrency=limit)
 
     def expire(self, run_id):
+        """Move run_id's saved expiry into the past to simulate missed heartbeats without
+        waiting.
+        """
         with self.engine.begin() as connection:
             connection.execute(
                 sa.update(Run)
@@ -122,12 +151,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def start_executor(self, handler=None, settings=FAST_SETTINGS):
+        """Start a tracked executor using the fake handler/settings and return it for this case."""
         executor = RunExecutor(self.store, handler=handler, settings=settings)
         self.executors.append(executor)
         await executor.start()
         return executor
 
     async def test_claim_skips_pending_indexing_and_archived_conversations(self):
+        """Reserve only queued work whose submission is ready and conversation is visible."""
         self.seed_run(status="pending")
         self.seed_run(submission_status="indexing")
         self.seed_run(archived=True)
@@ -138,6 +169,7 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_row(ready_id))["status"], "running")
 
     async def test_two_workers_cannot_claim_the_same_run_or_exceed_one_global_slot(self):
+        """Race two workers and allow only one claim under the shared one-slot limit."""
         first_id = self.seed_run()
         self.seed_run()
         claims = await asyncio.gather(self.claim("first"), self.claim("second"))
@@ -147,6 +179,7 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.claim("third"))
 
     async def test_shared_concurrency_limit_and_skip_locked_rows(self):
+        """Respect a larger shared slot limit and skip run rows locked by another transaction."""
         first_id, second_id, third_id = (self.seed_run() for _ in range(3))
         with self.engine.begin() as connection:
             connection.execute(sa.select(Run.id).where(Run.id == first_id).with_for_update())
@@ -158,6 +191,7 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_row(third_id))["status"], "queued")
 
     async def test_heartbeat_and_publication_require_current_owner_and_attempt(self):
+        """Reject reservation renewal or result saving with a stale owner token or attempt."""
         run_id = self.seed_run()
         claim = await self.claim()
         for stale in (
@@ -171,6 +205,9 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_row(run_id))["attempt"], 1)
 
     async def test_expired_run_is_interrupted_and_keeps_slot_until_acknowledged(self):
+        """Keep an expired run occupying its slot until the matching owner is explicitly
+        acknowledged.
+        """
         run_id = self.seed_run()
         queued_id = self.seed_run()
         claim = await self.claim()
@@ -190,6 +227,9 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_row(run_id))["status"], "interrupted")
 
     async def test_complete_is_atomic_and_cannot_publish_twice(self):
+        """Save one answer together with completion and refuse a second result from the same
+        claim.
+        """
         run_id = self.seed_run()
         claim = await self.claim()
         self.assertTrue(await self.store.complete(claim, RunResult("Winner answer")))
@@ -206,6 +246,7 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0].content, "Winner answer")
 
     async def test_handlerless_startup_recovers_orphans_without_claiming_queued_work(self):
+        """Recover expired work without taking queued jobs when no handler is installed."""
         orphan_id = self.seed_run(status="running")
         queued_id = self.seed_run()
         executor = await self.start_executor()
@@ -215,10 +256,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await executor.stop()
 
     async def test_executor_completes_handler_and_restart_does_not_replay_result(self):
+        """Complete a fake answer, restart, and execute only the new job rather than replaying
+        the old one.
+        """
         run_id = self.seed_run()
         handled = []
 
         async def handler(claim):
+            """Record the claimed run ID and return a fixed answer without model IO."""
             handled.append(claim.run_id)
             return RunResult("Fake answer, no LLM call")
 
@@ -232,9 +277,13 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handled, [run_id, next_id])
 
     async def test_handler_failure_is_terminal_and_error_does_not_contain_input(self):
+        """Save a generic failed state without retrying or leaking the handler's private
+        exception text.
+        """
         run_id = self.seed_run()
 
         async def handler(claim):
+            """Raise a private error string that must never reach saved errors or logs."""
             raise RuntimeError("private input must not reach DB errors")
 
         with self.assertLogs("uvicorn.error", level="ERROR") as logs:
@@ -248,10 +297,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.claim())
 
     async def test_ambiguous_compute_failure_retains_slot_instead_of_releasing_admission(self):
+        """Mark uncertain external work interrupted and keep the next job from using its slot."""
         run_id = self.seed_run()
         self.seed_run()
 
         async def handler(claim):
+            """Raise ComputeStateUnknown to simulate a lost connection to possibly running
+            inference.
+            """
             raise ComputeStateUnknown("External compute may still be active")
 
         executor = await self.start_executor(handler)
@@ -262,10 +315,16 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await executor.stop()
 
     async def test_heartbeat_keeps_a_long_running_handler_leased(self):
+        """Keep a blocked fake handler running longer than its original expiry through heartbeat
+        renewal.
+        """
         run_id = self.seed_run()
         release, started = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Signal startup, wait for release and return an answer while heartbeats keep
+            running.
+            """
             started.set()
             await release.wait()
             return RunResult("Done")
@@ -286,11 +345,13 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await executor.stop()
 
     async def test_shutdown_drains_in_flight_work_and_leaves_queue_durable(self):
+        """Let current work finish during shutdown without claiming the next queued job."""
         run_id = self.seed_run()
         queued_id = self.seed_run()
         release, started = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Wait for the shutdown case to release the active job, then return its fake answer."""
             started.set()
             await release.wait()
             return RunResult("Drained")
@@ -307,10 +368,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_row(queued_id))["status"], "queued")
 
     async def test_shutdown_timeout_interrupts_without_claiming_native_compute_stopped(self):
+        """Mark overdue work interrupted on shutdown and retain its owner rather than assert GPU
+        stoppage.
+        """
         run_id = self.seed_run()
         started, stopped = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Wait until cancelled and signal that the Python handler exited through finally."""
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -328,10 +393,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["result_message_id"])
 
     async def test_late_handler_cannot_publish_after_lease_loss(self):
+        """Reject a late answer from a handler that ignored its first cancellation after expiry."""
         run_id = self.seed_run()
         started, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Delay an answer, acknowledge but ignore cancellation once, then return after
+            explicit release.
+            """
             started.set()
             try:
                 await release.wait()
@@ -353,10 +422,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             release.set()
 
     async def test_heartbeat_database_failure_stops_handler_conservatively(self):
+        """Interrupt/cancel on heartbeat DB failure while retaining the slot and hiding private
+        connection text.
+        """
         run_id = self.seed_run()
         started, stopped = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Wait indefinitely until cancellation and signal handler exit in finally."""
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -376,10 +449,14 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("private DSN" in entry for entry in logs.output))
 
     async def test_cancel_flag_interrupts_without_pretending_full_cancel_api_exists(self):
+        """Observe a saved cancellation flag, stop the Python handler and save no final answer."""
         run_id = self.seed_run()
         started, stopped = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Signal startup and wait for cancellation, then signal exit without producing a
+            result.
+            """
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -405,10 +482,16 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_shutdown_returns_when_handler_resists_cancellation_and_fences_its_late_result(
         self,
     ):
+        """Bound shutdown waiting and refuse a later answer even when the handler repeatedly
+        ignores cancellation.
+        """
         run_id = self.seed_run()
         started, release = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
+            """Ignore task cancellation until release is set, then return a deliberately too-late
+            answer.
+            """
             started.set()
             while not release.is_set():
                 try:

@@ -1,4 +1,4 @@
-"""Apply versioned migrations using an existing application transaction."""
+"""Apply pending Alembic database changes using the caller's open connection."""
 
 from alembic import command
 from alembic.config import Config
@@ -8,10 +8,12 @@ from src.backend.database.config import PROJECT_ROOT
 
 
 def upgrade_database(connection: Connection) -> None:
-    """Upgrade to head; propagate errors so startup cannot use an incomplete schema.
+    """Apply all pending database revisions using the supplied synchronous connection.
 
-    The caller owns the transaction. Legacy databases are adopted only after the
-    baseline revision validates their schema; this function never stamps blindly.
+    connection must belong to the caller's transaction. Return None after upgrading
+    to the latest revision; the caller commits or rolls back. Existing unversioned
+    databases must pass the baseline's schema checks before being adopted.
+    Propagate migration errors so backend startup cannot continue with a partial schema.
     """
     migration_config = Config(str(PROJECT_ROOT / "alembic.ini"))
     migration_config.attributes["connection"] = connection

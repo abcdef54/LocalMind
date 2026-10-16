@@ -267,6 +267,7 @@ Browser dùng `/api/v1`. Dev Vite proxy và production Nginx proxy giữ nguyên
 | GET | `/api/v1/conversations/{id}/documents/{file_id}` | Metadata |
 | GET | `/api/v1/conversations/{id}/documents/{file_id}/content` | Nội dung preview hoặc download được kiểm soát |
 | DELETE | `/api/v1/conversations/{id}/documents/{file_id}` | 202 deletion task hoặc 204 nếu đã xóa xong |
+| GET | `/api/v1/conversations/{id}/submissions/by-client-id/{client_submission_id}` | Tra cứu lượt gửi sau khi mất response |
 | GET | `/api/v1/runs/{run_id}` | Snapshot trạng thái/result/error |
 | GET | `/api/v1/runs/{run_id}/events` | SSE tiến độ thực, có sequence ID |
 | POST | `/api/v1/runs/{run_id}/cancel` | 202 yêu cầu cancel; không hứa đã dừng compute |
@@ -308,7 +309,7 @@ files: <file B bytes>
 }
 ```
 
-Server kiểm tra số phần `files`, thứ tự và manifest; kích thước/content hash phải xác định từ bytes thực nhận, không tin client. Submit không file vẫn dùng contract này để giảm số luồng phải bảo trì.
+Server kiểm tra số phần `files`, thứ tự và manifest; kích thước phải xác định từ bytes thực nhận, không tin client. Không hash nội dung file để kiểm tra trùng. Submit không file vẫn dùng contract này để giảm số luồng phải bảo trì.
 
 ```json
 {
@@ -319,8 +320,8 @@ Server kiểm tra số phần `files`, thứ tự và manifest; kích thước/c
   "run_id": "run-uuid",
   "status": "accepted",
   "documents": [
-    { "id": "attachment-a", "client_file_id": "file-a", "status": "indexing" },
-    { "id": "attachment-b", "client_file_id": "file-b", "status": "indexing" }
+    { "id": "attachment-a", "client_file_id": "file-a", "status": "pending" },
+    { "id": "attachment-b", "client_file_id": "file-b", "status": "pending" }
   ]
 }
 ```
@@ -330,7 +331,7 @@ Server kiểm tra số phần `files`, thứ tự và manifest; kích thước/c
 - Error envelope: `{ "error": { "code": "UPLOAD_TOO_LARGE", "message": "...", "request_id": "...", "details": {} } }`.
 - 404 sai resource/phạm vi; 409 state conflict hoặc reuse idempotency key với payload khác; 413 quá dung lượng; 415 loại file không hỗ trợ; 422 dữ liệu sai; 429 queue/quota; 503 dependency/model unavailable.
 - Lỗi trước commit trả HTTP error; lỗi indexing/inference sau 202 nằm trong submission/run snapshot và event. Không chuyển lỗi backend thành assistant message giả được persist.
-- Key unique theo conversation và `client_submission_id`; server lưu fingerprint settings/text/manifest/content hash và kết quả. Retry cùng nội dung trả lại IDs cũ; key cũ với nội dung khác trả 409.
+- Key unique theo conversation và `client_submission_id`; server lưu fingerprint settings/text/manifest (tên và kích thước file, không hash nội dung file) và kết quả. Retry cùng key và fingerprint trả lại IDs cũ; key cũ với fingerprint khác trả 409. Cơ chế này không kiểm tra thay đổi bytes nếu tên và kích thước file vẫn giống nhau.
 - Upload/submit chưa nhận response: lookup trạng thái bằng client ID trước retry; không tự tạo key mới cho cùng thao tác.
 - Cursor messages dựa trên `(created_at, id)` với thứ tự rõ ràng; câu trả lời API phải có `items`, `next_cursor`, `has_more`. Truy vấn lấy recent context cần lấy mới nhất rồi sắp lại cũ → mới.
 - Dữ liệu thời gian là UTC timezone-aware, serialize ISO 8601; UI format theo locale.
@@ -551,6 +552,15 @@ Filesystem và Chroma không tham gia transaction DB: cần compensation và rec
 
 Batch upload là all-or-nothing ở giai đoạn acceptance: file B không hợp lệ thì không tạo tin nhắn thành công chỉ với file A. Trạng thái indexing sau commit là từng file và có thể retry. Không hứa atomicity vật lý xuyên DB/disk/vector.
 
+### 8.2.1. Chống trùng tên file
+
+- Chỉ kiểm tra tên file đầy đủ, bao gồm phần mở rộng và phân biệt chữ hoa/thường; không hash hoặc so sánh nội dung file.
+- Trong cùng conversation, không nhận hai file cùng tên trong một lần gửi hoặc file trùng tên với tài liệu chưa bị xóa đã có. Trả lỗi 409 chỉ rõ tên bị trùng; chưa nhận cả batch.
+- `report.pdf` trong hai conversation khác nhau được phép.
+- `report.py`, `report.cpp` và `report.pdf` trong cùng conversation được phép vì tên đầy đủ khác nhau.
+- File đã xóa không giữ tên; người dùng có thể gửi lại file cùng tên.
+- Retry submission đã được nhận trả lại kết quả cũ trước khi kiểm tra trùng tên, không tạo thêm file.
+
 ### 8.3. Phân biệt file gửi kèm và citations
 
 - User message có danh sách `attachments` đã gửi kèm.
@@ -576,7 +586,7 @@ Batch upload là all-or-nothing ở giai đoạn acceptance: file B không hợp
 |---|---|
 | Conversation | UUID, title, created_at, updated_at, deleted_at, summary, summary_through_message_id |
 | Message | UUID, conversation_id, sequence hoặc cursor order, role, content, settings snapshot, submission_id/run_id, created_at |
-| Attachment | UUID, conversation_id, submission_id, original_name, storage_key, MIME, size, hash, status, error, created_at, deleted_at |
+| Attachment | UUID, conversation_id, submission_id, original_name, storage_key, MIME, size, status, error, created_at, deleted_at |
 | MessageAttachment | user_message_id ↔ attachment_id; khác bảng citations |
 | MessageCitation | assistant_message_id ↔ attachment_id; có thể bổ sung chunk/page locator |
 | Submission | UUID, conversation_id, client_submission_id, fingerprint, status, error, created_at |
@@ -825,6 +835,22 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - Shutdown ngừng dispatch, drain có grace period, sau đó fence/cancel tác vụ chưa xong. Handler chống cancellation không khiến executor đợi vô hạn; slot vẫn bị giữ và kết quả về muộn không được persist.
 - Production chưa đăng ký handler AI: dispatcher phục hồi trạng thái nhưng không claim run chờ để chạy giả. `/chat` legacy chưa đi qua admission này; tích hợp pipeline/citations/metadata thuộc BE-10, cancel API đầy đủ thuộc BE-15.
 - Kiểm thử bằng fake handlers và PostgreSQL 15 thật: 21 tests execution/config/lifespan và 25 API regression tests pass, không gọi model/GPU. Hướng dẫn và giới hạn vận hành: `src/backend/execution/README.md`.
+
+### BE-06 — Attachment schema và storage: hoàn thành (2026-10-16)
+
+- Migration `0004_submission_attachments` bổ sung submission/message/client file ID, storage key, trạng thái và lỗi cho attachments. Liên kết composite chặn gắn file sang message/submission/conversation khác.
+- Giữ dữ liệu/citation cũ; file legacy mặc định ready, tombstone mặc định deleted. Message API trả riêng `attachments` của user và `citations` của assistant, không lộ đường dẫn lưu trữ.
+- Storage mới dùng staging và thư mục blob theo UUID server; tên gốc chỉ là metadata. Chuyển cả batch trước commit, cleanup khi rollback; commit chưa xác định thì giữ blob để đối chiếu DB sau.
+- Cleanup chạy lúc startup hoặc `python -m src.backend.uploads.cleanup`, có grace period và file lock để không dọn batch còn đang nhận; không xóa batch đã commit. Xóa tài liệu đã nhận thuộc BE-09.
+
+### BE-07 — Submission API: hoàn thành (2026-10-16)
+
+- Thêm POST multipart `/api/v1/conversations/{id}/submissions` nhận text/settings và nhiều file, trả 202 sau commit. GET `.../submissions/by-client-id/{client_submission_id}` tra cứu khi mất response.
+- Nhận stream trực tiếp; mặc định 25 MiB/file, 100 MiB/batch, tối đa 10 file, 2 lượt nhận đồng thời/process. Kiểm tra bytes thực nhận, timeout, extension, tên file và manifest; batch lỗi không tạo message thiếu file.
+- Chỉ chặn trùng tên đầy đủ (phân biệt chữ hoa/thường) trong cùng conversation; khác đuôi hoặc khác conversation được phép. Không hash nội dung file. Fingerprint chỉ tính metadata nhỏ để xử lý retry cùng client key; không xác minh bytes thay đổi nếu tên/kích thước/key giữ nguyên.
+- Khóa conversation khi nhận chính thức, resolve retry trước kiểm tra tên/run active. Retry trả lại IDs cũ, metadata khác cùng key trả 409; có test gửi đồng thời và mất xác nhận commit.
+- File sau acceptance ở pending, submission accepted, run pending; text-only có submission ready/run queued. Chưa parse/embed hoặc gọi AI: BE-08/BE-10 thực hiện các bước này; frontend cũ vẫn dùng API cũ.
+- Hướng dẫn contract, limits, cleanup và migration: `src/backend/uploads/README.md`. Tổng 100 tests pass: 53 API/stream, 26 migration/schema, 21 executor/config/lifespan, dùng PostgreSQL 15 tạm; không migrate DB app hoặc gọi model/GPU.
 
 ## 18. Implementation Tasks
 
