@@ -782,7 +782,17 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - Database mới được tạo schema; database legacy chỉ được tiếp nhận sau khi schema comparison khớp. Không tự stamp hoặc sửa schema legacy bị lệch.
 - Có hướng dẫn backup, adoption, tạo revision mới và cảnh báo downgrade baseline làm mất dữ liệu trong `src/backend/database/migrations/README.md`.
 - Kiểm thử PostgreSQL 15 riêng: database trống, preservation dữ liệu/citation links khi adoption, upgrade lặp, schema drift (cột/type/nullability/default/index/FK/unique/PK), async startup/CLI, downgrade/re-upgrade và offline SQL.
-- Chưa chạy migration lên database app thực; chưa triển khai BE-02 hoặc thay đổi schema cho các tính năng tương lai.
+- Chưa chạy migration lên database app thực; phạm vi BE-01 không gồm API v1 hoặc schema cho các tính năng tương lai.
+
+### BE-02 — API v1 foundation: hoàn thành (2026-10-16)
+
+- Mount FastAPI sub-application `/api/v1` với router riêng; `/api/v1/docs` và `/api/v1/openapi.json` công bố contract dùng chung. Endpoint nghiệp vụ v1 chưa được thêm ở bước này.
+- Error envelope chuẩn cho lỗi domain, HTTP, validation và unexpected exception; lỗi server không trả raw exception, lỗi validation không echo input/body.
+- Middleware pure ASGI cấp/normalize UUID request ID, ghi correlation log và header; CORS expose header cho browser. Không buffer body/stream.
+- Shared `ChatSettings` validate model name, personality, reasoning mode, finite temperature [0, 2], boolean tools và integer group size [2, 7], mặc định 3; từ chối unknown fields.
+- API cũ giữ response/error contract hiện tại; schema settings mới chưa nối vào inference. Model existence/service admission thuộc các task sau, group size thực thi thuộc BE-12.
+- 16 tests pass: validation, status/error envelope, 500 sanitization, header preservation, correlation/concurrency, streaming-body compatibility, OpenAPI và production wiring của legacy/v1; không cần DB/GPU/model download.
+- Hướng dẫn: `src/backend/api/README.md`. Task tiếp theo BE-03: CRUD conversations v1 và cursor pagination messages.
 
 
 

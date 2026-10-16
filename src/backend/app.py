@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.backend.api.application import install_api_foundation
 from src.backend.constants import DEFAULT_MODEL_REPO_ID, DEFAULT_MODEL_GGUF_FILE
 from src.backend.database.session import upgrade_database_schema, async_session_maker
 from src.backend.routes import chat_router, conversation_router, uploads_router, models_router
@@ -104,9 +105,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 app.include_router(chat_router)
 app.include_router(conversation_router)
 app.include_router(uploads_router)
 app.include_router(models_router)
+install_api_foundation(app)

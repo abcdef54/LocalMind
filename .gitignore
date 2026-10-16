@@ -128,6 +128,7 @@ $RECYCLE.BIN/
 
 tests/
 !src/backend/database/tests/
+!src/backend/api/tests/
 
 *.gguf
 

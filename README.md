@@ -125,6 +125,10 @@ Database schema changes now use Alembic. Backend startup applies pending migrati
 see [database migration instructions](src/backend/database/migrations/README.md)
 for existing-database backups, baseline adoption, CLI commands, and integration tests.
 
+The [API v1 foundation](src/backend/api/README.md) documents shared settings,
+request IDs, error responses, compatibility, and tests. Its OpenAPI schema is
+available at `/api/v1/openapi.json`; feature endpoints are added incrementally.
+
 LocalMind has evolved through several major architectural generations.
 
 #### LocalMind v1.0 — The Prototype
