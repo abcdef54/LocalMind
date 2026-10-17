@@ -107,7 +107,7 @@ class AttachmentSchemaTests(unittest.TestCase):
                 with self.engine.begin() as connection:
                     connection.execute(insert(Attachment).values(**document))
 
-    def test_live_filename_unique_but_tombstone_releases_name(self):
+    def test_live_filename_unique_but_deleted_document_releases_name(self):
         """Reject a repeated live filename, then allow it after the original document is marked
         deleted.
         """

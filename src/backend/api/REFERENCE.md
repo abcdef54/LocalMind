@@ -49,8 +49,8 @@ citation links are excluded. Legacy message timestamps are stored as naive UTC
 and serialized with a UTC offset. This task does not change that storage type.
 
 DELETE archives the conversation, its messages and attachment metadata in one
-transaction, retaining content for the later physical-cleanup workflow. It does
-not initialize Chroma, remove blobs or purge vectors; physical cleanup is BE-09.
+transaction. It does not initialize Chroma or remove bytes inline; the background
+document cleanup worker removes blobs/vectors and records completion in PostgreSQL.
 The legacy deletion endpoint has been removed. BE-08 retrieval checks both live
 conversation and ready undeleted document generations, so archived chats are
 excluded from search even before disk/vector cleanup. New run creation must
@@ -176,3 +176,27 @@ separate from citations in message pages. Attachment snapshots include safe
 indexing errors and committed chunk counts. See [indexing](../indexing/README.md)
 for `POST /conversations/{id}/submissions/{submission_id}/retry-indexing` (202),
 recovery and the removal of the old `/uploads`/legacy deletion paths.
+
+
+## Documents (BE-09)
+
+All endpoints are scoped to a live conversation. Wrong-chat, missing or deleted
+files return 404; repeated DELETE returns 204 while the conversation exists.
+
+| Method | Path under `/api/v1/conversations/{id}/documents` | Result |
+|---|---|---|
+| GET | empty suffix | Newest-first page, `limit=50` (1–100), optional `before` cursor |
+| GET | `/{document_id}` | Filename, byte size, indexing state and safe error |
+| GET | `/{document_id}/content` | Preview PDF/text; DOCX downloads |
+| GET | `/{document_id}/content?download=true` | Download original bytes |
+| DELETE | `/{document_id}` | 204 after deleted status is saved; asynchronous physical cleanup |
+
+Preview/download works before indexing finishes. HTML and source files are served
+as text/plain, never executable HTML. Responses use no-store, nosniff and sandbox
+headers. Content unavailable on disk returns 404 without exposing the path.
+A download already opened can finish after deletion; new requests return 404.
+Document lists exclude documents marked as deleted; message history retains deleted citation flags.
+
+Deleting an attachment fails its pending/queued run with DOCUMENT_DELETED. It does
+not claim an already-running inference has stopped or remove context it already
+received. Future retrieval excludes the file; cancellation is a separate feature.

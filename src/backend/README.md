@@ -9,7 +9,7 @@ Database migrations → orphan upload cleanup → model synchronization
         ↓
 Initialize CPU embedding model + Chroma + AI graph
         ↓
-Start indexing worker + durable run executor
+Start indexing + document cleanup workers + durable run executor
         ↓
 Serve HTTP requests
    ├─ /api/v1 → submission acceptance → pending files

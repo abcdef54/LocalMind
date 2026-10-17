@@ -601,7 +601,7 @@ Không nhất thiết tạo tất cả bảng ngay bước frontend bootstrap. S
 
 - Unique `(conversation_id, client_submission_id)`; unique assistant result theo run để tránh persist hai lần.
 - Index messages `(conversation_id, created_at, id)`; attachments `(conversation_id, status)`; runs/tasks `(status, created_at)`.
-- Foreign keys với chính sách xóa rõ ràng; giữ tombstone metadata cần cho lịch sử, không để cascade vô tình xóa blob/index ngoài DB.
+- Foreign keys với chính sách xóa rõ ràng; giữ metadata của tài liệu đã xóa khi cần cho lịch sử, không để cascade vô tình xóa blob/index ngoài DB.
 - Dùng migration có version; không dựa vào `create_all` để nâng cấp database đã có.
 - Summary lưu watermark message đã tổng hợp; cập nhật cùng transaction hợp lý để không bỏ sót/đếm lại khi retry.
 - Serialize mutation trong cùng conversation hoặc dùng optimistic versioning; mặc định một run đang xử lý mỗi conversation, request cạnh tranh trả 409.
@@ -711,7 +711,7 @@ Giữ frontend cũ làm phương án rollback qua Git trong quá trình chuyển
 | Upload đang dở rồi đóng trang | Dữ liệu chưa commit được cleanup; nếu đã commit thì lookup/history khôi phục được |
 | Mở drawer phải | Chỉ tài liệu đã gửi ở chat này, có xem/xóa, không có upload/drop zone |
 | Xem/xóa file bằng ID thuộc chat khác | Bị từ chối trước khi đọc/xóa blob hoặc vector |
-| Xóa file thành công | Không retrieval được file nữa; citation cũ hiển thị tombstone |
+| Xóa file thành công | Không retrieval được file nữa; citation cũ hiển thị tài liệu đã bị xóa |
 
 ### 14.2. UI, API và recovery
 
@@ -721,7 +721,7 @@ Giữ frontend cũ làm phương án rollback qua Git trong quá trình chuyển
 - Pagination: conversation 1.000+ tin mở lần đầu chỉ fetch ≤ 50 tin; mỗi lần cuộn lên tải một trang, hết dữ liệu ngừng gọi; backend dùng LIMIT thực và không fetch toàn bộ lịch sử.
 - Page consistency: timestamp trùng, insert message giữa hai lần fetch, response đảo thứ tự và optimistic/server ID reconciliation không tạo tin trùng hoặc bỏ sót trang; prepend giữ scroll anchor.
 - Cache window: đọc quá 5 trang sẽ evict đúng vùng ngoài cửa sổ; về latest refetch không ghép sai khoảng trống; số entries/bytes không tăng vô hạn qua nhiều chat.
-- Cache invalidation: append làm mới latest, trang cũ ổn định; edit/delete/attachment tombstone không phục vụ dữ liệu cũ sai; Redis unavailable vẫn trả DB page có giới hạn.
+- Cache invalidation: append làm mới latest, trang cũ ổn định; sửa/xóa message hoặc đánh dấu tài liệu đã xóa không phục vụ dữ liệu cũ sai; Redis unavailable vẫn trả DB page có giới hạn.
 - Recovery tests: restart sau commit/trước enqueue, lỗi Chroma/disk, run interrupted, Redis unavailable nếu dùng.
 - Accessibility: keyboard navigation, dialog focus trap/return focus, focus-visible, contrast và reduced motion.
 - Performance: đo typing/render/scroll với dataset chuẩn, tách frontend timing khỏi inference/model load; chỉ thêm optimization khi có evidence.
@@ -839,7 +839,7 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 ### BE-06 — Attachment schema và storage: hoàn thành (2026-10-16)
 
 - Migration `0004_submission_attachments` bổ sung submission/message/client file ID, storage key, trạng thái và lỗi cho attachments. Liên kết composite chặn gắn file sang message/submission/conversation khác.
-- Giữ dữ liệu/citation cũ; file legacy mặc định ready, tombstone mặc định deleted. Message API trả riêng `attachments` của user và `citations` của assistant, không lộ đường dẫn lưu trữ.
+- Giữ dữ liệu/citation cũ; file legacy mặc định ready, tài liệu đã xóa mặc định có status deleted. Message API trả riêng `attachments` của user và `citations` của assistant, không lộ đường dẫn lưu trữ.
 - Storage mới dùng staging và thư mục blob theo UUID server; tên gốc chỉ là metadata. Chuyển cả batch trước commit, cleanup khi rollback; commit chưa xác định thì giữ blob để đối chiếu DB sau.
 - Cleanup chạy lúc startup hoặc `python -m src.backend.uploads.cleanup`, có grace period và file lock để không dọn batch còn đang nhận; không xóa batch đã commit. Xóa tài liệu đã nhận thuộc BE-09.
 
@@ -862,6 +862,16 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - Theo quyết định overhaul, thay implementation vector DB cũ, bỏ upload router/service cũ và DELETE conversation legacy đã được API v1 thay thế. Frontend cũ cần chuyển sang submission API; không giữ hai luồng upload song song.
 - Tách `get_vector_embedding_model()` (model MiniLM CPU) và `get_document_vector_index()` (Chroma dùng model đó). Production AI handler của submission vẫn thuộc BE-10; BE-08 không tạo câu trả lời giả.
 - 129 tests pass (53 API/stream, 28 migration/schema, 21 executor/config/lifespan, 27 indexing/tools/parser). Kiểm thử dùng PostgreSQL 15 tạm, Chroma thật và embeddings giả xác định; không tải model, gọi GPU hoặc thay đổi DB app. Chi tiết giới hạn, retry và recovery: `src/backend/indexing/README.md`.
+
+### BE-09 — Document APIs và cleanup: hoàn thành (2026-10-17)
+
+- Thêm GET danh sách tài liệu theo conversation (cursor, mặc định 50, tối đa 100), GET metadata, GET content để preview/download và DELETE document. Mọi endpoint kiểm tra conversation/file cùng phạm vi; không lộ đường dẫn filesystem.
+- Preview PDF/text, HTML/source dưới dạng text/plain, DOCX tải xuống; `download=true` buộc tải file. Không cache nội dung; file chưa indexing xong vẫn xem được nếu bytes tồn tại.
+- DELETE lưu trạng thái đã xóa vào DB trước, trả 204; retrieval loại ngay file deleted. Gửi lại DELETE cùng file là no-op 204. Pending/queued run phụ thuộc file chuyển failed; không tuyên bố dừng inference đã chạy.
+- Cleanup worker đọc các tài liệu được đánh dấu đã xóa trong PostgreSQL, dùng chung lock với indexing, xóa mọi generation vector và bytes. Lỗi/busy thử lại sau 30 giây; migration `0006_document_cleanup` lưu tiến độ qua restart. Archive conversation dùng cùng luồng cleanup.
+- Giữ metadata/citation cũ với deleted flag; cleanup không xóa messages. Tài liệu đang download có thể tải xong sau khi DELETE; request mới bị chặn. Đường dẫn ngoài managed storage được giữ lại và ghi mã lỗi an toàn.
+- 137 tests pass với PostgreSQL 18 tạm và Chroma thật, embeddings giả; không migrate DB app hoặc gọi model/GPU.
+- Không đổi tên project trong task này; tên đã thống nhất cho đợt overhaul là **Tournament-Based Test-Time Reasoning for LLMs** (`llm-tournament-reasoning`).
 
 ## 18. Implementation Tasks
 

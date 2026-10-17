@@ -138,7 +138,7 @@ Run this suite sequentially with API integration tests when using the same DB.
 
 Revision `0004_submission_attachments` adds nullable submission/message/client/storage
 identities and constrained lifecycle state to attachments. Legacy citation links and
-paths remain intact; old files default to ready and old tombstones become deleted.
+paths remain intact; old files default to ready and documents already marked as deleted retain that status.
 New file links must match the user message submission/conversation. A partial unique
 index protects live filenames for new submission attachments without rewriting old
 duplicates. The submission service also checks existing legacy filenames.
@@ -156,3 +156,10 @@ completed/failed/cancelled run outcomes and original rows/paths remain intact.
 Back up DB and `.uploads` together. Startup workers rebuild the index; the migration
 itself never loads a model, deletes bytes or invokes Chroma. See the
 [indexing guide](../../indexing/README.md) for limits, restart and retry behavior.
+
+
+## 0006_document_cleanup
+
+Adds cleanup attempt/completion timestamps, a safe error code and a partial index
+for pending deleted attachments. Documents already marked as deleted become eligible for cleanup;
+metadata/citations remain. Migration performs no filesystem or vector operations.

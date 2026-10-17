@@ -13,6 +13,7 @@ v1/schemas.py validates input; dependencies provide DB session
         ↓
 Conversation route → services/conversation_history.py
 Submission route  → uploads receiver → services/submissions.py
+Document route  → services/documents.py → metadata / content / mark as deleted
 Indexing retry    → indexing/store.py → reset failed files
         ↓
 Service commits changes / reads a bounded page

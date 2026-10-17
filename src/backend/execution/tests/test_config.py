@@ -59,6 +59,9 @@ class ExecutorLifespanTests(unittest.IsolatedAsyncioTestCase):
         fake_indexer = MagicMock()
         fake_indexer.start = AsyncMock()
         fake_indexer.stop = AsyncMock()
+        fake_cleanup = MagicMock()
+        fake_cleanup.start = AsyncMock()
+        fake_cleanup.stop = AsyncMock()
         fake_session_context = MagicMock()
         fake_session_context.__aenter__ = AsyncMock(return_value=object())
         fake_session_context.__aexit__ = AsyncMock(return_value=False)
@@ -77,6 +80,7 @@ class ExecutorLifespanTests(unittest.IsolatedAsyncioTestCase):
             patch.object(application, "get_ai"),
             patch.object(application, "RunExecutor", return_value=fake_executor),
             patch.object(application, "IndexingWorker", return_value=fake_indexer),
+            patch.object(application, "DocumentCleanupWorker", return_value=fake_cleanup),
             patch.object(
                 application.ExecutorSettings, "from_environment", return_value=ExecutorSettings()
             ),
@@ -90,3 +94,5 @@ class ExecutorLifespanTests(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError("lifespan body failure")
         fake_executor.stop.assert_awaited_once()
         fake_indexer.stop.assert_awaited_once()
+        fake_cleanup.start.assert_awaited_once()
+        fake_cleanup.stop.assert_awaited_once()

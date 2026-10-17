@@ -1,6 +1,6 @@
 # Submission uploads (BE-06 / BE-07)
 
-This module receives file bytes and stores them safely. It does not parse documents or create embeddings.
+This module receives file bytes, stores them safely and cleans up deleted documents. It does not parse documents or create embeddings.
 
 ```text
 Browser selects/drops files (future UI: browser memory only)
@@ -23,6 +23,13 @@ Commit fails definitely → remove this batch's files
 Commit outcome uncertain → keep files for reconciliation
         ↓
 Indexing worker processes accepted files separately
+
+Document DELETE → save deleted status in DB → hidden from retrieval
+        ↓
+document_cleanup.py checks PostgreSQL for documents marked as deleted
+        ↓
+Acquire indexing lock → remove vectors + bytes → mark cleanup complete
+Busy/error → retry later; citation metadata stays
 ```
 
 [Configuration, contracts and troubleshooting](REFERENCE.md).

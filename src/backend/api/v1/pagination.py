@@ -12,7 +12,7 @@ from src.backend.api.errors import ApiError
 
 
 class HistoryCursor(BaseModel):
-    """Store where a conversation or message page should continue.
+    """Store where a conversation or message/document page should continue.
 
     created_at and id identify the oldest item already returned. resource prevents
     using a conversation-list cursor for messages; conversation_id restricts message
@@ -22,7 +22,7 @@ class HistoryCursor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[1] = 1
-    resource: Literal["conversations", "messages"]
+    resource: Literal["conversations", "messages", "documents"]
     conversation_id: UUID | None = None
     created_at: datetime
     id: UUID
@@ -52,12 +52,12 @@ def encode_cursor(cursor: HistoryCursor) -> str:
 def decode_cursor(
     token: str,
     *,
-    resource: Literal["conversations", "messages"],
+    resource: Literal["conversations", "messages", "documents"],
     conversation_id: UUID | None = None,
 ) -> HistoryCursor:
     """Read a before token and verify it belongs to the requested list/chat.
 
-    token is base64 JSON; resource must match conversations or messages, and
+    token is base64 JSON; resource must match conversations, messages or documents, and
     conversation_id must match the expected chat (None for the conversation list).
     Return HistoryCursor, or raise ApiError 422 INVALID_CURSOR for malformed or
     mismatched data. The original row may have been deleted; no DB lookup is needed.

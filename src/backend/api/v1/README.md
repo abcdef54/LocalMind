@@ -6,6 +6,7 @@ This directory maps HTTP endpoints to backend operations; it does not run docume
 router.py
    ├─ conversations.py → CRUD + bounded message pages
    ├─ submissions.py → receive multipart → accept send → HTTP 202
+   ├─ documents.py → list / metadata / content / delete
    └─ indexing.py → retry failed indexing → HTTP 202
         ↓
 services / indexing store perform DB operations

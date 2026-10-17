@@ -51,7 +51,7 @@ MIME, byte size, status and deleted flag. Storage paths are never returned.
 looks up a send after a lost response; 404 means no committed submission was found
 at the time of that lookup. Retrying with the same key is safe even if the first
 request is still in flight. Conversation message pages expose user `attachments`
-separately from assistant `citations`, including tombstones after deletion.
+separately from assistant `citations`, including references to documents marked as deleted.
 
 ## Filename duplicates and retries
 
@@ -140,13 +140,12 @@ python -m src.backend.uploads.cleanup
 
 The Docker backend already mounts `.uploads`, so no new volume/container is
 needed. Use a shared local filesystem for API processes; file locking here targets
-Linux/WSL/Docker. Physical deletion of committed documents belongs to BE-09.
+Linux/WSL/Docker. Committed document deletion is handled by `document_cleanup.py` (BE-09).
 
 ## Migration and verification
 
 Revision `0004_submission_attachments` extends the existing attachments table.
-Legacy records keep paths/citations and become ready (deleted tombstones become
-deleted). New attachments must link to a user message in the same submission and
+Legacy records keep paths/citations and become ready (records already marked as deleted retain that status). New attachments must link to a user message in the same submission and
 conversation. Status, error shape, nonnegative size, storage/client identities
 and live filename uniqueness are protected by constraints. New links are nullable
 only for legacy compatibility. Staging itself has no DB record.
@@ -165,3 +164,28 @@ python -m unittest discover -s src/backend/database/tests -v
 python -m unittest discover -s src/backend/api/tests -v
 python -m unittest discover -s src/backend/execution/tests -v
 ```
+
+
+## Deleted document cleanup (BE-09)
+
+The API commits deleted_at/status=deleted before returning. File metadata and
+citation links remain. A worker started in app.py polls at one-second intervals,
+reading up to 20 deleted-document records due for cleanup per pass. Failed or busy files retry after 30
+seconds. PostgreSQL cleanup_attempted_at, cleanup_completed_at and cleanup_error
+survive restart; there is no in-memory-only deletion queue or Redis requirement.
+
+Cleanup acquires the same per-document OS lock as indexing. It removes all vector
+generations in the scoped collection and matching UUIDs in the old `langchain`
+collection, then unlinks the file. Missing bytes are already-cleaned success.
+A crash between steps repeats those idempotent operations. Unknown commit results
+also retry safely. Only a successful DB commit records completion. Generic error
+codes omit paths, content and private exception messages.
+
+New files resolve through storage_key under UPLOAD_ROOT; legacy paths must stay
+inside the repository's .uploads directory. Paths escaping through symlinks are
+rejected and retained for operator inspection. No unrelated directory is scanned
+or deleted. Empty shared batch/lock directories may remain.
+
+Conversation archival queues its documents marked as deleted through the same worker.
+Shutdown stops new cleanup and waits for any current native deletion to finish
+before releasing its lock; it cannot safely kill a running Chroma thread.

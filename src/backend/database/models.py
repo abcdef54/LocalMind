@@ -156,6 +156,8 @@ class Attachment(Base):
     index_generation selects the attempt whose vectors may be retrieved when ready.
     index_owner/index_expires_at reserve indexing work, index_attempt counts retries,
     and chunk_count is committed only after all vectors were written successfully.
+    cleanup_completed_at confirms bytes/vectors were removed; cleanup_attempted_at
+    delays retries and cleanup_error records a safe error code without file contents.
     """
 
     __tablename__ = "attachments"
@@ -189,6 +191,12 @@ class Attachment(Base):
         ),
         UniqueConstraint("storage_key", name="uq_attachments_storage_key"),
         UniqueConstraint("submission_id", "client_file_id", name="uq_attachments_client_file"),
+        Index(
+            "ix_attachments_cleanup_pending",
+            "deleted_at",
+            "cleanup_attempted_at",
+            postgresql_where=text("deleted_at IS NOT NULL AND cleanup_completed_at IS NULL"),
+        ),
         Index("ix_attachments_message_id", "message_id"),
         Index("ix_attachments_status_created", "status", "created_at"),
         Index(
@@ -222,6 +230,9 @@ class Attachment(Base):
     index_expires_at = Column(DateTime(timezone=True), nullable=True)
     index_attempt = Column(Integer, nullable=False, server_default=text("0"))
     chunk_count = Column(Integer, nullable=False, server_default=text("0"))
+    cleanup_completed_at = Column(DateTime(timezone=True), nullable=True)
+    cleanup_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    cleanup_error = Column(String(64), nullable=True)
     extracted_text = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)

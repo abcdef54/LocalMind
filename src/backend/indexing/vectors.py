@@ -186,3 +186,30 @@ class DocumentVectorIndex:
                 ]
             }
         )
+
+    def delete_document_vectors(self, conversation_id: UUID, document_id: UUID) -> None:
+        """Remove every indexing generation of one document in the selected chat.
+
+        Args:
+            conversation_id: Chat UUID recorded on the deleted attachment.
+            document_id: Attachment UUID whose partial and ready vectors are removed.
+
+        Repeating deletion is safe. This does not remove PostgreSQL metadata or files.
+        """
+        self.collection.delete(
+            where={
+                "$and": [
+                    {"conversation_id": str(conversation_id)},
+                    {"source_file_id": str(document_id)},
+                ]
+            }
+        )
+
+        # The removed LangChain Chroma wrapper used its default "langchain" collection.
+        # UUIDs are globally unique even though that legacy metadata has no chat field.
+        collection_names = {
+            getattr(collection, "name", collection) for collection in self.client.list_collections()
+        }
+        if "langchain" in collection_names:
+            legacy = self.client.get_collection("langchain", embedding_function=None)
+            legacy.delete(where={"source_file_id": str(document_id)})

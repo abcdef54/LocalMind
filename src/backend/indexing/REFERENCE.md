@@ -148,11 +148,11 @@ Removed the old `LocalMindVectorDB`, `AttachmentService`, `/uploads` routes and
 unused attachment CRUD/DTO helpers. Also removed legacy conversation deletion
 which bypassed the new run/indexing guards. Use the existing
 `DELETE /api/v1/conversations/{id}` for metadata archival; physical document/vector
-removal and new document list/preview/download/delete endpoints are BE-09.
+removal and document list/preview/download/delete endpoints are implemented in BE-09.
 
 **Frontend impact:** old upload-on-drop, old document drawer actions and legacy
 chat-deletion calls no longer work. The frontend overhaul must use submissions
-and v1 conversation deletion; document drawer APIs follow in BE-09. The old text
+and v1 conversation deletion; document drawer APIs are available under `/api/v1/conversations/{id}/documents`. The old text
 chat remains available with scoped retrieval, but v1 submissions do not yet
 produce assistant answers until BE-10 registers the AI handler.
 

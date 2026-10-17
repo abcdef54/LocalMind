@@ -19,6 +19,7 @@ Validate live conversation → query cursor-bounded rows
         ↓
 Build messages with attachments and scoped citations
 
+Document request → documents.py → scoped list / content / mark as deleted
 Legacy /chat → conversation_services.py → DB context/messages/summary
 Legacy /models → model_services.py → model files + registry/config
 ```

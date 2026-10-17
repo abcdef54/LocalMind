@@ -205,3 +205,11 @@ class SubmissionResponse(BaseModel):
     status: str
     documents: list[DocumentResponse]
     error: dict | None = None
+
+
+class DocumentPage(BaseModel):
+    """Return a bounded newest-first document page without storage paths."""
+
+    items: list[DocumentResponse]
+    next_cursor: str | None
+    has_more: bool

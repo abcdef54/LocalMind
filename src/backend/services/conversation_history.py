@@ -109,8 +109,8 @@ async def delete_conversation(session: AsyncSession, conversation_id: UUID) -> N
 
     session must have no open transaction. Lock conversation_id and reject recorded
     active runs with ApiError 409. Raise 404 if the chat is missing/already deleted.
-    Commit metadata changes together and return None. Keep file bytes and vector
-    entries for the later document-deletion task; do not claim physical cleanup here.
+    Commit metadata changes together and return None. Queue documents marked as deleted for background file/vector cleanup.
+    Physical cleanup completion is tracked separately; historical citations remain.
     """
     async with session.begin():
         conversation = await get_conversation(session, conversation_id, lock=True)

@@ -11,6 +11,7 @@ from src.backend.execution.store import RunStore
 from src.backend.execution.worker import RunExecutor
 from src.backend.indexing.config import IndexingSettings
 from src.backend.indexing.resources import get_document_vector_index
+from src.backend.uploads.document_cleanup import DocumentCleanupWorker
 from src.backend.indexing.store import IndexingStore
 from src.backend.indexing.worker import IndexingWorker
 from src.backend.uploads.config import UploadSettings
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
         None after migrations, orphan cleanup, model synchronization and worker
         startup. Indexing processes pending files; AI runs still await BE-10's handler.
 
-    Stop both workers when serving ends, including when startup/body raises.
+    Stop indexing, cleanup and run workers when serving ends, including on failure.
     Migration/worker initialization failures propagate; model sync failures are logged.
     """
     executor_settings = ExecutorSettings.from_environment()
@@ -118,6 +119,9 @@ async def lifespan(app: FastAPI):
         upload_settings.root / "indexing_locks",
         settings=indexing_settings,
     )
+    app.state.document_cleanup_worker = DocumentCleanupWorker(
+        async_session_maker, vector_index, upload_settings.root
+    )
     app.state.indexing_worker = indexer
     await executor.start()
 
@@ -132,12 +136,16 @@ async def lifespan(app: FastAPI):
 
     try:
         await indexer.start()
+        await app.state.document_cleanup_worker.start()
         yield
     finally:
         try:
-            await indexer.stop()
+            await app.state.document_cleanup_worker.stop()
         finally:
-            await executor.stop()
+            try:
+                await indexer.stop()
+            finally:
+                await executor.stop()
     print("[INFO] Shutting down LocalMind backend...")
     print()
     print("=" * 60)
