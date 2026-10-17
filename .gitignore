@@ -138,3 +138,4 @@ tests/
 update_log.md
 
 .migrations/
+.agent
