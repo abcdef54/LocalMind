@@ -3,7 +3,7 @@
 The AI package builds replies; document acceptance/indexing is managed by separate backend modules.
 
 ```text
-Legacy /chat prepares conversation context
+execution/handler.py loads saved context and settings
         ↓
 langgraph/graph_builder.py → LocalMindAI.chat()
 Add personality instruction + bind conversation UUID
@@ -15,7 +15,7 @@ LangGraph: setup → generate candidates → tournament_select
         ↓
 Winning answer + citation IDs returned to caller
         ↓
-Caller persists assistant message
+RunStore persists assistant, citations and metadata atomically
 
 llms/ manages GGUF files and llama-swap configuration
 system_prompt/ loads personality instructions

@@ -9,11 +9,11 @@ app.js → boot() → render() → initializeApp()
         ↓
 User selects conversation/settings or sends a message
         ↓
-sendMessage() → API wrapper → legacy POST /chat
+sendMessage() → legacy POST /chat (removed in BE-10)
         ↓
-Backend generates/persists reply → client updates messages
+Needs replacement: v1 submission → HTTP 202 → read saved message pages
 
 Attachment controls still call legacy /uploads endpoints
         ↓
-Those endpoints were removed in BE-08: this path needs replacement
+Removed in BE-08: use v1 submissions and document APIs instead
 ```

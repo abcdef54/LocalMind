@@ -163,3 +163,11 @@ itself never loads a model, deletes bytes or invokes Chroma. See the
 Adds cleanup attempt/completion timestamps, a safe error code and a partial index
 for pending deleted attachments. Documents already marked as deleted become eligible for cleanup;
 metadata/citations remain. Migration performs no filesystem or vector operations.
+
+
+## 0007_generation_metadata
+
+Adds nullable JSONB generation_metadata to messages and expands model_name from
+50 to 255 characters to match ChatSettings. Existing answers remain unchanged.
+Downgrade removes metrics and rejects shrinking model names longer than 50 rather
+than silently truncating them. No inference, file or vector operations run here.

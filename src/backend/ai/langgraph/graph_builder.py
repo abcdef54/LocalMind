@@ -52,11 +52,13 @@ class LocalMindAI:
                 omitted for tool-free summarization. Never supplied by model arguments.
 
         Returns:
-            Final answer text and cited document IDs from the winning candidate.
+            Final answer, winning citation IDs and compact tournament metadata;
+            raw candidate answers and prompts are not included in persisted metadata.
 
         Raises:
-            ValueError: If a tool-enabled call lacks a conversation UUID.
-            Exception: Graph/model errors propagate to the calling run or legacy route.
+            ValueError: If a tool-enabled call lacks a conversation UUID or generation
+                finishes without a nonblank answer.
+            Exception: Graph/model errors propagate to the calling run handler.
         """
         if tools_enabled and not isinstance(conversation_id, UUID):
             raise ValueError("Tool-enabled chat requires a server-selected conversation UUID")
@@ -85,9 +87,27 @@ class LocalMindAI:
         }
 
         state = await self._graph.ainvoke(init, config)
+        answer = state.get("final_answer")
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("Generation finished without an answer")
+        metadata = {
+            name: state[name]
+            for name in (
+                "winner_candidate_id",
+                "rank_latency",
+                "rank_calls",
+                "rank_parse_failed",
+                "tournament_rounds",
+                "tournament_rank_calls",
+                "tournament_max_group_size",
+            )
+            if name in state
+        }
+        metadata["candidate_count"] = len(state.get("pool", []))
         return {
-            "final_answer": state.get("final_answer", "An Error Occured While Generating Answer."),
+            "final_answer": answer,
             "citations": state.get("citations", []),
+            "generation_metadata": metadata,
         }
 
     async def baseline_chat(

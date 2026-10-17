@@ -29,6 +29,6 @@ When every file in the submission is ready:
 Submission: ready · Run: queued
 ```
 
-A failed file blocks the run; retry resets failed files only. Running queued AI jobs awaits BE-10.
+A failed file blocks the run; retry resets failed files only. The executor runs queued AI jobs through GenerateReply (BE-10).
 
 [Configuration, contracts and troubleshooting](REFERENCE.md).

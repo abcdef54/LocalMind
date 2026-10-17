@@ -1,20 +1,16 @@
-# Legacy routes
+# Remaining legacy routes
 
-These routes support the existing client during the overhaul. New conversation/submission contracts live under `api/v1`.
+Conversation reads/metadata and model management remain during the frontend overhaul.
 
 ```text
-Legacy POST /chat → chat.py
-        ↓
-dependencies.py supplies ConversationService + LocalMindAI
-        ↓
-Load summary/recent messages → save user message
-        ↓
-LocalMindAI → LangGraph → answer + citation IDs
-        ↓
-Resolve citations → save assistant → possibly update summary
-        ↓
-Return HTTP response
+/conversation → conversations.py → ConversationService → database CRUD
+/models       → models.py → ModelService → model files / registry / llama-swap
 
-/conversation → conversations.py → ConversationService
-/models       → models.py → ModelService
+Old POST /chat → removed; cannot bypass executor admission
+        ↓
+Use POST /api/v1/conversations/{id}/submissions instead
+        ↓
+HTTP 202 → indexing if needed → queued run → background generation
+        ↓
+Read saved answer through the v1 paginated message API
 ```

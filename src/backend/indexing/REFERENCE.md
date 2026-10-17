@@ -3,7 +3,7 @@
 Files saved by the submission API are indexed after HTTP acceptance. The backend
 starts `IndexingWorker` alongside the AI run executor. No Redis, extra worker
 container or new embedding dependency is required. Indexing uses CPU embeddings;
-LLM execution remains separate and is connected to submissions in BE-10.
+LLM execution uses the separate durable executor, connected to submissions in BE-10.
 
 ## Reading the code
 
@@ -100,13 +100,13 @@ The retriever requires a backend UUID and never has an unfiltered fallback:
 The LangGraph document tool is created with that server-side conversation bound
 in a closure. Model arguments contain only `query` and `k_returns`; an extra
 conversation ID is rejected. Standard LangChain tool invocation preserves schema
-validation and citation artifacts. Legacy `/chat` now supplies its validated chat
-UUID too, so there is no remaining global-search route into document contents.
+validation and citation artifacts. GenerateReply supplies the saved conversation
+UUID; the legacy `/chat` route has been removed.
 Tool-free summaries do not need a conversation scope.
 
-Run-specific document-version snapshots, final answer persistence and live events
-are still BE-10/BE-14 work. This task supplies the indexing/readiness gate and
-conversation-scoped tool, not a complete submission-to-answer implementation.
+BE-10 connects ready submissions to final-answer persistence and rechecks citation
+eligibility at commit. Retrieval uses current ready generations, not a frozen
+per-run version snapshot. Live events remain BE-13/BE-14.
 
 ## Limits
 
@@ -153,8 +153,8 @@ removal and document list/preview/download/delete endpoints are implemented in B
 **Frontend impact:** old upload-on-drop, old document drawer actions and legacy
 chat-deletion calls no longer work. The frontend overhaul must use submissions
 and v1 conversation deletion; document drawer APIs are available under `/api/v1/conversations/{id}/documents`. The old text
-chat remains available with scoped retrieval, but v1 submissions do not yet
-produce assistant answers until BE-10 registers the AI handler.
+chat endpoint was removed in BE-10. Ready v1 submissions now produce assistant
+answers through the durable executor.
 
 ## Verification
 

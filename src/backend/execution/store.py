@@ -6,15 +6,16 @@ and expiry time; these are checked again before saving an answer. Database updat
 use short transactions, so model calls never keep a database lock open.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
+import json
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.backend.database.models import Conversation, Message, Run, Submission
+from src.backend.database.models import Attachment, Conversation, Message, Run, Submission
 
 ADMISSION_LOCK_KEY = 1280134734
 LEASED_STATUSES = ("running", "cancel_requested")
@@ -43,16 +44,35 @@ class RunClaim:
 class RunResult:
     """Carry the assistant text returned by a run handler.
 
-    content must be a nonempty string. Its original whitespace is preserved when
-    saved. Citations and other answer metadata will be connected in BE-10.
+    Args:
+        content: Nonblank answer text; original whitespace is preserved.
+        citation_ids: Document UUIDs used by the winner. Completion rechecks their
+            conversation, deletion and readiness before linking them to the answer.
+        generation_metadata: Small JSON object containing tournament counts, winner
+            identity and timing, never full prompts, candidate answers or file paths.
     """
 
     content: str
+    citation_ids: tuple[UUID, ...] = ()
+    generation_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Reject missing, non-string or whitespace-only assistant text with ValueError."""
+        """Reject blank answers, invalid citation UUIDs and oversized/non-JSON metadata.
+
+        Copy metadata so later caller mutations cannot change the result to be saved.
+        Deduplicate citations while preserving their first occurrence.
+        """
         if not isinstance(self.content, str) or not self.content.strip():
             raise ValueError("RunResult requires non-empty assistant content")
+        if any(not isinstance(identity, UUID) for identity in self.citation_ids):
+            raise ValueError("Citation IDs must be UUIDs")
+        if not isinstance(self.generation_metadata, dict):
+            raise ValueError("Generation metadata must be a JSON object")
+        encoded = json.dumps(self.generation_metadata, allow_nan=False)
+        if len(encoded.encode("utf-8")) > 8192:
+            raise ValueError("Generation metadata exceeds 8 KiB")
+        object.__setattr__(self, "citation_ids", tuple(dict.fromkeys(self.citation_ids)))
+        object.__setattr__(self, "generation_metadata", json.loads(encoded))
 
 
 class RunStore:
@@ -182,32 +202,83 @@ class RunStore:
     async def complete(self, claim: RunClaim, result: RunResult) -> bool:
         """Save one assistant reply and mark its run completed in the same transaction.
 
-        claim identifies the execution and result contains its answer text. Save only
+        claim identifies the execution; result contains answer text, citation UUIDs
+        and compact generation metadata. Recheck ready citations in this chat and
+        save the original settings on the assistant message. Save only
         while the claim is unexpired, the run is running, and cancellation is not set.
         Return True after inserting the assistant message, linking it to the run and
         releasing the execution slot. Return False without saving an answer when those
         checks fail. A late or repeated handler result cannot create another reply.
         """
         async with self.sessions.begin() as session:
+            # Conversation-first order matches document deletion and submission
+            # acceptance, preventing lock inversion when citations are rechecked.
+            conversation = await session.scalar(
+                select(Conversation)
+                .where(Conversation.id == claim.conversation_id, Conversation.deleted_at.is_(None))
+                .with_for_update()
+            )
+            if conversation is None:
+                return False
             run = await session.scalar(
                 select(Run)
                 .where(
                     self._owned_lease(claim),
                     Run.status == "running",
                     Run.cancel_requested.is_(False),
+                    Run.conversation_id == claim.conversation_id,
+                    Run.submission_id == claim.submission_id,
+                    Run.message_id == claim.message_id,
                 )
                 .with_for_update()
             )
             if run is None:
                 return False
+            citations = []
+            if result.citation_ids:
+                citations = list(
+                    (
+                        await session.scalars(
+                            select(Attachment)
+                            .where(
+                                Attachment.id.in_(result.citation_ids),
+                                Attachment.conversation_id == run.conversation_id,
+                                Attachment.deleted_at.is_(None),
+                                Attachment.status == "ready",
+                                Attachment.index_generation.is_not(None),
+                            )
+                            .order_by(Attachment.id)
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+            settings = run.settings_snapshot
             message = Message(
                 conversation_id=run.conversation_id,
                 run_id=run.id,
                 content=result.content,
                 role="assistant",
+                citations=citations,
+                model_name=settings.get("model_name"),
+                personality=settings.get("personality"),
+                temperature=settings.get("temperature"),
+                reasoning_mode=settings.get("reasoning_mode"),
+                generation_metadata=result.generation_metadata,
             )
             session.add(message)
             await session.flush()
+            # A row lock cannot freeze time. Check the lease again after citation
+            # reads/insertion; rolling back also removes the uncommitted message.
+            still_owned = await session.scalar(
+                select(Run.id).where(
+                    self._owned_lease(claim),
+                    Run.cancel_requested.is_(False),
+                    Run.status == "running",
+                )
+            )
+            if still_owned is None:
+                await session.rollback()
+                return False
             run.result_message_id = message.id
             run.status = "completed"
             run.finished_at = func.clock_timestamp()

@@ -9,7 +9,14 @@ from langchain.messages import HumanMessage, AIMessage
 from langchain_core.messages import ToolMessage
 from src.backend.ai.langgraph.graph_states import AgentState, Candidate
 from src.backend.ai.langgraph.graph_configs import get_config, MAX_RANK_GROUP
-from src.backend.ai.langgraph.graph_utils import get_llm, _seeded, _sample_idx, _log_token_usage
+from src.backend.ai.langgraph.graph_utils import (
+    get_llm,
+    _seeded,
+    _sample_idx,
+    _log_token_usage,
+    invoke_model,
+)
+from src.backend.ai.errors import InferenceStateUnknown
 from src.backend.ai.langchain.tools import create_retrieval_tool, fetch_web_page, tavily_search
 
 
@@ -40,6 +47,11 @@ async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> t
     Returns:
         Produced messages and unique cited file IDs after at most five model rounds.
         ToolMessage artifacts are preserved instead of bypassing tool validation.
+
+    Raises:
+        ValueError: A model reply is blank/unsupported or five rounds end without
+            a final answer. Tool output must never be saved as the assistant answer.
+        InferenceStateUnknown: A model request may still be running remotely.
     """
     bound_llm = llm.bind_tools(list(tools_map.values())) if tools_map else llm
     current_messages = list(messages)
@@ -48,11 +60,13 @@ async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> t
     max_iterations = 5
 
     for _ in range(max_iterations):
-        response = await bound_llm.ainvoke(current_messages)
+        response = await invoke_model(bound_llm, current_messages)
         messages_produced.append(response)
         current_messages.append(response)
 
         if not response.tool_calls:
+            if not isinstance(response.content, str) or not response.content.strip():
+                raise ValueError("Model returned an empty or unsupported answer")
             break
 
         for tool_call in response.tool_calls:
@@ -87,19 +101,33 @@ async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> t
                 current_messages.append(tool_msg)
             except Exception as e:
                 err_msg = ToolMessage(
-                    content=f"Error executing tool: {str(e)}", tool_call_id=tool_id, name=tool_name
+                    content="The tool could not complete this request.",
+                    tool_call_id=tool_id,
+                    name=tool_name,
                 )
                 messages_produced.append(err_msg)
                 current_messages.append(err_msg)
 
+    else:
+        raise ValueError("Model exceeded the tool-call round limit without an answer")
     return messages_produced, list(set(citations_extracted))
 
 
 async def generate(state: AgentState, config: RunnableConfig) -> dict:
-    """Self-consistency sampling. Produce `width` INDEPENDENT samples of the RAW user question:
-    HumanMessage(s) only, NO system prompt, NO structured output, plain text. Each sample uses a
-    fresh random seed (only meaningful at temperature > 0; see MODE_CONFIG note).
-    RETURNS: pool."""
+    """Generate independent candidate replies using the supplied conversation context.
+
+    Args:
+        state: Messages, user query and candidate count prepared by setup.
+        config: Saved model settings and server-selected conversation UUID for tools.
+
+    Returns:
+        Candidate pool with each answer's produced messages and citation IDs.
+        Every sample receives a fresh seed; prompts and bracket rules are unchanged.
+
+    Raises:
+        Exception: Any candidate failure after sibling requests have finished. Remote
+            inference uncertainty takes priority so admission is not released early.
+    """
     width = state["width"]
     llm = get_llm(config)  # plain client; temperature from config (0.0 for low, >0 for wider modes)
 
@@ -129,7 +157,15 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
         )
         for _ in range(width)
     ]
-    results = await asyncio.gather(*tasks)
+    # Wait for every sibling request even if one fails. Returning early would let
+    # the executor release its slot while another candidate is still generating.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    failures = [value for value in results if isinstance(value, BaseException)]
+    if failures:
+        uncertain = next(
+            (error for error in failures if isinstance(error, InferenceStateUnknown)), None
+        )
+        raise uncertain or failures[0]
 
     pool = []
     _gen_prompt_text = " ".join(
@@ -229,7 +265,9 @@ async def rank_no_reasoning(
     label_to_cand = dict(zip(labels, candidates))
     prompt = _no_reasoning_prompt(user_query, candidates, labels)
 
-    resp = await llm.bind(max_tokens=16).ainvoke([HumanMessage(content=prompt)])  # exactly ONE call
+    resp = await invoke_model(
+        llm.bind(max_tokens=16), [HumanMessage(content=prompt)]
+    )  # exactly ONE call
     text = resp.content if isinstance(resp.content, str) else str(resp.content)
     # TEMPORARY token-usage debug
     _log_token_usage(idx, "Rank Call", msg=resp, prompt_text=prompt, completion_text=text)

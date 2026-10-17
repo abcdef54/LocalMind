@@ -873,6 +873,18 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - 137 tests pass với PostgreSQL 18 tạm và Chroma thật, embeddings giả; không migrate DB app hoặc gọi model/GPU.
 - Không đổi tên project trong task này; tên đã thống nhất cho đợt overhaul là **Tournament-Based Test-Time Reasoning for LLMs** (`llm-tournament-reasoning`).
 
+### BE-10 — Submission → LangGraph → persisted answer: hoàn thành (2026-10-17)
+
+- `app.py` đăng ký `GenerateReply` cho RunExecutor. Chỉ run queued/submission ready được claim; text-only chạy trực tiếp qua queue, file sends chờ mọi tài liệu indexing thành công.
+- Handler đọc settings đã lưu, conversation summary và tối đa 20 message trước input theo thứ tự thời gian; append input hiện tại đúng một lần và tên file kèm theo. Không giữ DB session trong inference; không phụ thuộc trang history browser đang xem. Summary watermark/token budget thuộc BE-11.
+- LangGraph trả answer, UUID citations của winner và metadata nhỏ (candidate count, winner ID, ranking/tournament counts, latency, parse fallback). Không lưu full prompts, tool content hay câu trả lời ứng viên thua trong metadata.
+- Completion kiểm tra conversation/owner/attempt/lease/cancel, lọc citations ready cùng chat và kiểm tra lease lần nữa sau writes. Assistant, citations, settings, generation metadata và completed run commit trong một transaction; late/repeated result không tạo thêm answer.
+- Model lỗi/answer rỗng/hết vòng tool call không được lưu thành câu trả lời giả. Đợi mọi candidate sibling kết thúc khi có lỗi; transport timeout/lost connection/HTTP 5xx chuyển interrupted, giữ slot khi compute từ xa chưa được xác nhận đã dừng. Tắt SDK retries; timeout mỗi request là 120 giây.
+- Bỏ direct `/chat` route và helpers create-message/citations/summary cũ không còn caller, tránh bypass admission. Frontend cũ cần dùng submission 202 + message pages; không thêm adapter giữ HTTP chờ inference.
+- Migration `0007_generation_metadata` thêm JSONB metadata nullable và mở rộng message model_name lên 255 theo ChatSettings. Message API trả metadata, dữ liệu cũ giữ null.
+- 150 tests pass với PostgreSQL 18 tạm, Chroma thật và model/embeddings giả, bao gồm multipart → indexing → scoped RAG → graph → persisted answer và high mode 5 candidates/2 rank calls. Không migrate DB app, tải model hoặc gọi GPU.
+- Group size tùy chỉnh và event/SSE/cancel HTTP API vẫn thuộc BE-12 đến BE-15. Thuật toán tournament, candidate counts và bracket rules không đổi trong task này.
+
 ## 18. Implementation Tasks
 
 | Task | Phạm vi thực hiện | Tiêu chí hoàn thành |

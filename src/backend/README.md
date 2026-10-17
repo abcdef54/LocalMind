@@ -1,23 +1,25 @@
 # Backend reading map
 
-Start here for the whole backend, then open the README for the module you want to understand. The two request paths below currently coexist.
+Start with the flow, then open the README for the module you need.
 
 ```text
-app.py → lifespan startup
+app.py startup → migrations → orphan cleanup → model synchronization
         ↓
-Database migrations → orphan upload cleanup → model synchronization
+Initialize embedding model + Chroma + AI graph
         ↓
-Initialize CPU embedding model + Chroma + AI graph
+Start indexing, document cleanup and run executor workers
         ↓
-Start indexing + document cleanup workers + durable run executor
+POST /api/v1/conversations/{id}/submissions → accept send → HTTP 202
         ↓
-Serve HTTP requests
-   ├─ /api/v1 → submission acceptance → pending files
-   │                                ↓
-   │                         indexing → ready → run queued
-   │                                ↓
-   │                         AI handler pending BE-10
-   └─ legacy /chat → context → LangGraph → persist answer
+Files pending → indexing → all ready (text-only sends skip indexing)
         ↓
-Shutdown → stop workers and handle outstanding work
+Run queued → execution/handler.py → saved context + settings
+        ↓
+LangGraph → candidates → optional RAG → tournament winner
+        ↓
+Guarded transaction → save assistant + citations + metadata → run completed
+        ↓
+GET /api/v1/conversations/{id}/messages → bounded history page
+
+Shutdown → stop workers; retain slots if remote compute is uncertain
 ```

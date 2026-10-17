@@ -104,7 +104,8 @@ class MessageResponse(BaseModel):
 
     attachments are files sent by the user; citations are documents referenced in
     an assistant answer. submission_id/run_id link new messages to their send/job;
-    old messages may have neither. Created times are returned as timezone-aware UTC.
+    old messages may have neither. generation_metadata contains compact tournament
+    counts/timing for new answers, or None for old messages. Created times use UTC.
     """
 
     id: UUID
@@ -118,6 +119,7 @@ class MessageResponse(BaseModel):
     created_at: datetime
     submission_id: UUID | None = None
     run_id: UUID | None = None
+    generation_metadata: dict | None = None
     attachments: list[DocumentResponse] = Field(default_factory=list)
     citations: list[CitationResponse] = Field(default_factory=list)
 

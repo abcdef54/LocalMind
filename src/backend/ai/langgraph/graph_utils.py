@@ -10,6 +10,7 @@ from src.backend.ai.langgraph.graph_states import AgentState
 
 dotenv.load_dotenv()
 
+
 @lru_cache(maxsize=8)
 def _build_llm(model_name: str, base_url: str, temperature: float) -> ChatOpenAI:
     """Cached so repeated nodes reuse one client. Args are hashable on purpose.
@@ -25,6 +26,8 @@ def _build_llm(model_name: str, base_url: str, temperature: float) -> ChatOpenAI
         model=model_name,
         temperature=temperature,
         max_tokens=2048,
+        max_retries=0,
+        timeout=120,
     )
 
 
@@ -53,6 +56,7 @@ def _seeded(llm: ChatOpenAI, seed: int) -> ChatOpenAI:
 
 # ───────────────────────── Answer extraction / comparison ─────────────────────────
 
+
 def _sample_idx(state: AgentState, config: RunnableConfig) -> str:
     """Per-sample tag for log lines, so logs from concurrently-running GSM8K questions don't
     interleave into something that looks impossible. Prefers config['configurable']['sample_idx']
@@ -70,6 +74,7 @@ def _sample_idx(state: AgentState, config: RunnableConfig) -> str:
 # ── TEMPORARY token-usage debug logging (console only; nothing stored in state/CSV/metrics) ──
 # Remove this block when context-usage inspection is no longer needed.
 
+
 def _estimate_tokens(text: str) -> int:
     """Approximate token count when the API doesn't report usage. Prefers tiktoken; falls back to a
     ~4-chars/token heuristic. Estimate only — used purely for the temporary debug print."""
@@ -77,6 +82,7 @@ def _estimate_tokens(text: str) -> int:
         return 0
     try:
         import tiktoken
+
         return len(tiktoken.get_encoding("cl100k_base").encode(text))
     except Exception:
         return max(1, (len(text) + 3) // 4)
@@ -105,7 +111,9 @@ def _token_usage_from_message(msg) -> Optional[tuple]:
     return None
 
 
-def _log_token_usage(idx: str, label: str, msg=None, prompt_text: str = "", completion_text: str = "") -> None:
+def _log_token_usage(
+    idx: str, label: str, msg=None, prompt_text: str = "", completion_text: str = ""
+) -> None:
     """TEMPORARY: print prompt/completion/total tokens for one LLM call. Uses real usage metadata
     when available, otherwise an approximate tokenizer estimate. Console only — stores nothing."""
     usage = _token_usage_from_message(msg)
@@ -119,3 +127,32 @@ def _log_token_usage(idx: str, label: str, msg=None, prompt_text: str = "", comp
     print(f"Prompt Tokens: {p}")
     print(f"Completion Tokens: {c}")
     print(f"Total Tokens: {t}\n")
+
+
+async def invoke_model(model, messages):
+    """Invoke one model request and distinguish uncertain remote compute failures.
+
+    Args:
+        model: Chat client or bound runnable exposing async ainvoke.
+        messages: Role/content messages passed to this single inference request.
+
+    Returns:
+        Model response after the request completes normally.
+
+    Raises:
+        InferenceStateUnknown: Connection loss, timeout or server failure leaves
+            remote computation unconfirmed. No automatic model retry is attempted.
+        Exception: Other model errors propagate; no error text becomes an answer.
+    """
+    import httpx
+    from openai import APIConnectionError, APIStatusError
+    from src.backend.ai.errors import InferenceStateUnknown
+
+    try:
+        return await model.ainvoke(messages)
+    except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
+        raise InferenceStateUnknown("Remote inference state is unknown") from error
+    except APIStatusError as error:
+        if error.status_code >= 500:
+            raise InferenceStateUnknown("Remote inference state is unknown") from error
+        raise

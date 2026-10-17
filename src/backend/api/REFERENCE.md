@@ -4,10 +4,10 @@ API v1 is mounted as a separate FastAPI application at `/api/v1` so its exceptio
 handlers and OpenAPI contract do not change legacy response bodies.
 
 - Legacy routes and documentation remain at their existing paths, including
-  `/chat`, `/conversation`, `/models`, and `/docs`; the old `/uploads` router was removed.
+  `/conversation`, `/models`, and `/docs`; `/uploads` and direct `/chat` were removed.
 - V1 documentation: `/api/v1/docs`; schema: `/api/v1/openapi.json`.
 - Conversation CRUD, bounded history, multipart submissions and indexing retry
-  endpoints are implemented. Submission-to-inference integration remains BE-10.
+  endpoints are implemented. BE-10 connects accepted submissions to background inference.
 - Add completed feature routers in `v1/router.py`. Feature endpoints use the
   existing main application lifespan/database resources; do not add a second
   AI/database startup lifecycle to the mounted application.
@@ -171,7 +171,7 @@ The test client uses HTTPX, already available in the current AI dependency stack
 
 The multipart send and client-key lookup contracts are documented in
 [the upload guide](../uploads/README.md). Background indexing/scoped retrieval is
-implemented in BE-08; AI integration follows in BE-10. User attachments are
+implemented in BE-08; BE-10 runs the AI after the readiness gate. User attachments are
 separate from citations in message pages. Attachment snapshots include safe
 indexing errors and committed chunk counts. See [indexing](../indexing/README.md)
 for `POST /conversations/{id}/submissions/{submission_id}/retry-indexing` (202),
@@ -200,3 +200,14 @@ Document lists exclude documents marked as deleted; message history retains dele
 Deleting an attachment fails its pending/queued run with DOCUMENT_DELETED. It does
 not claim an already-running inference has stopped or remove context it already
 received. Future retrieval excludes the file; cancellation is a separate feature.
+
+
+## Background replies (BE-10)
+
+POST submissions still returns 202 after acceptance, not after inference. Once
+files are ready, the executor invokes LangGraph and saves one assistant message.
+Read it using the conversation message pages; `run_id` links it to the accepted
+send. Messages include saved generation settings and nullable generation_metadata.
+Ordinary failures create no assistant message; lookup identifies the original send,
+while run status/event/cancel endpoints are scheduled for subsequent tasks.
+The old direct POST /chat route returns 404 and cannot bypass executor admission.

@@ -195,6 +195,7 @@ async def list_messages(
             created_at=message.created_at,
             submission_id=message.submission_id,
             run_id=message.run_id,
+            generation_metadata=message.generation_metadata,
             attachments=[
                 DocumentResponse(
                     id=attachment.id,

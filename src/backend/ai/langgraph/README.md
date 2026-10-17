@@ -19,7 +19,7 @@ tournament_select
                  Single-candidate groups advance without a ranking call
                  Repeat with winners until one remains
         ↓
-END → final_answer + citations returned to caller
+END → final_answer + citations + compact tournament metrics
 ```
 
 Group size is currently fixed at 3; configurable groups and visualization events are planned.

@@ -26,9 +26,9 @@ def get_model_manager() -> LocalMindModelManager:
 
 
 def get_conversation_service(
-    session: AsyncSession = Depends(get_async_session), ai: LocalMindAI = Depends(get_ai)
+    session: AsyncSession = Depends(get_async_session),
 ) -> ConversationService:
-    return ConversationService(ai=ai, session=session)
+    return ConversationService(session=session)
 
 
 def get_model_service(

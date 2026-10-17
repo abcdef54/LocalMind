@@ -89,6 +89,7 @@ class Message(Base):
     Old messages can leave both links empty. attachments lists files sent with a
     user message, while citations lists documents referenced by an answer. Message
     creation times keep the original naive-UTC database format for compatibility.
+    generation_metadata stores compact tournament metrics for completed new answers.
     """
 
     __tablename__ = "messages"
@@ -115,6 +116,10 @@ class Message(Base):
             "submission_id IS NULL OR role = 'user'", name="ck_messages_submission_role"
         ),
         CheckConstraint("run_id IS NULL OR role = 'assistant'", name="ck_messages_run_role"),
+        CheckConstraint(
+            "generation_metadata IS NULL OR jsonb_typeof(generation_metadata) = 'object'",
+            name="ck_messages_generation_metadata",
+        ),
     )
 
     id = Column(UUID(as_uuid=True), nullable=False, primary_key=True, default=uuid.uuid4)
@@ -127,7 +132,8 @@ class Message(Base):
     content = Column(Text, nullable=False)
     role = Column(String(20), nullable=False)
     personality = Column(String(50), nullable=True)
-    model_name = Column(String(50), nullable=True)
+    model_name = Column(String(255), nullable=True)
+    generation_metadata = Column(JSONB(none_as_null=True), nullable=True)
     reasoning_mode = Column(String(20), nullable=True)
     temperature = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)

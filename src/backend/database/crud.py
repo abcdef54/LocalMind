@@ -1,7 +1,6 @@
-from datetime import datetime
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select
 from uuid import UUID
 
 from src.backend.database.models import Conversation, Message, Attachment, InstalledModel
@@ -25,49 +24,6 @@ async def create_conversation(title: str, session: AsyncSession) -> Conversation
         await session.refresh(new_conversation)
 
         return new_conversation
-
-    except Exception:
-        await session.rollback()
-        raise
-
-
-async def create_message(
-    content: str,
-    conversation_id: UUID,
-    role: str,
-    session: AsyncSession,
-    model_name: str,
-    temperature: float,
-    reasoning_mode: str,
-    personality: str,
-    citations: list[Attachment] = [],
-) -> Message:
-    conversation_id = coerce_uuid(conversation_id)
-    conversation = await session.execute(
-        select(Conversation).where(
-            Conversation.id == conversation_id, Conversation.deleted_at == None
-        )
-    )
-    conversation = conversation.scalar_one_or_none()
-    if not conversation:
-        raise ConversationNotFound(f"Conversation {conversation_id} not found")
-
-    new_message = Message(
-        conversation_id=conversation_id,
-        content=content,
-        role=role,
-        model_name=model_name,
-        temperature=temperature,
-        reasoning_mode=reasoning_mode,
-        personality=personality,
-        citations=citations or [],
-    )
-    try:
-        session.add(new_message)
-        await session.commit()
-        await session.refresh(new_message)
-
-        return new_message
 
     except Exception:
         await session.rollback()
@@ -147,27 +103,6 @@ async def rename_conversation(
     except Exception:
         await session.rollback()
         raise
-
-
-async def get_citations(
-    conversation_id: UUID, attachments_ids: list[str], session: AsyncSession
-) -> list[Attachment]:
-    """Get SqlAlchemy Attachment table objects from ids"""
-    conversation_id = coerce_uuid(conversation_id)
-    if not attachments_ids:
-        return []
-
-    stmt = (
-        select(Attachment)
-        .join(Conversation, Conversation.id == Attachment.conversation_id)
-        .where(
-            Attachment.conversation_id == conversation_id,
-            Attachment.id.in_(attachments_ids),
-            Conversation.deleted_at == None,  # <-- Guard against archived context indexing
-        )
-    )
-    result = await session.execute(stmt)
-    return result.scalars().all()
 
 
 async def get_infomation_source(

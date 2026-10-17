@@ -154,15 +154,26 @@ class RunExecutor:
                 type(exception).__name__,
             )
 
-    async def _renew_lease(self, claim: RunClaim, handler_task: asyncio.Task[RunResult]) -> None:
+    async def _renew_lease(
+        self, claim: RunClaim, handler_task: asyncio.Task[RunResult], stop_heartbeat: asyncio.Event
+    ) -> None:
         """Keep the claim's reservation alive while its handler task is running.
+
+        Args:
+            claim: Current run reservation, including owner token and attempt.
+            handler_task: Generation task to cancel if its reservation is lost.
+            stop_heartbeat: Set when execution ends so an in-flight DB call can finish.
 
         Wait heartbeat_seconds between updates. On database failure, lost ownership or
         a cancellation request, try to record interruption and cancel handler_task.
         Return after that cancellation request; it does not prove model compute stopped.
         """
-        while True:
-            await asyncio.sleep(self.settings.heartbeat_seconds)
+        while not stop_heartbeat.is_set():
+            try:
+                await asyncio.wait_for(stop_heartbeat.wait(), self.settings.heartbeat_seconds)
+                return
+            except asyncio.TimeoutError:
+                pass
             try:
                 state = await self._database_call(
                     self.store.heartbeat(claim, lease_seconds=self.settings.lease_seconds)
@@ -173,10 +184,11 @@ class RunExecutor:
                     claim.run_id,
                     type(exception).__name__,
                 )
-                await self._interrupt_safely(claim, "HEARTBEAT_FAILED")
-                handler_task.cancel()
+                if not stop_heartbeat.is_set():
+                    await self._interrupt_safely(claim, "HEARTBEAT_FAILED")
+                    handler_task.cancel()
                 return
-            if state != "active":
+            if state != "active" and not stop_heartbeat.is_set():
                 code = "CANCEL_REQUESTED" if state == "cancel_requested" else "LEASE_LOST"
                 await self._interrupt_safely(claim, code)
                 handler_task.cancel()
@@ -187,8 +199,8 @@ class RunExecutor:
 
         claim identifies the job and this execution attempt. Start the handler and its
         heartbeat together. Save a RunResult through the store; mark ordinary failures
-        failed, and uncertain compute/cancellation interrupted. Always cancel and await
-        the heartbeat when the handler path ends. Do not retry inference automatically.
+        failed, and uncertain compute/cancellation interrupted. Signal and await
+        heartbeat shutdown when the handler path ends. Do not retry inference automatically.
         """
 
         async def invoke_handler() -> RunResult:
@@ -201,7 +213,8 @@ class RunExecutor:
             return await self.handler(claim)
 
         handler_task = asyncio.create_task(invoke_handler(), name=f"handler-{claim.run_id}")
-        heartbeat_task = asyncio.create_task(self._renew_lease(claim, handler_task))
+        stop_heartbeat = asyncio.Event()
+        heartbeat_task = asyncio.create_task(self._renew_lease(claim, handler_task, stop_heartbeat))
         try:
             result = await handler_task
             if not isinstance(result, RunResult):
@@ -230,9 +243,9 @@ class RunExecutor:
                     type(database_error).__name__,
                 )
         finally:
-            heartbeat_task.cancel()
+            stop_heartbeat.set()
             with suppress(asyncio.CancelledError):
-                await heartbeat_task
+                await asyncio.shield(heartbeat_task)
 
     async def stop(self) -> None:
         """Stop taking new work, then give active handlers time to finish.

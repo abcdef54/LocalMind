@@ -4,11 +4,9 @@ The backend owns one in-process dispatcher using the existing PostgreSQL `runs`
 table. No Redis, worker container or migration is required for this step. The
 dispatcher starts/stops in the main FastAPI lifespan after schema initialization.
 
-**Current integration boundary:** production registers no AI handler yet. It
-recovers expired execution records but does not claim or fail queued work merely
-because LangGraph has not been integrated. Legacy `/chat` still executes through
-its original path and is not covered by executor admission. BE-10 connects the
-pipeline and reconciles admission for supported chat entry points.
+**Production integration:** app.py registers GenerateReply, which invokes the real
+LangGraph pipeline for queued, ready submissions. The old direct POST /chat route
+has been removed, so HTTP generation no longer bypasses shared admission.
 
 ## Claim and admission
 
@@ -42,8 +40,9 @@ The executor publishes one assistant message and marks the run `completed` in a
 single transaction, only if the lease remains owned and no cancel is pending.
 The handler must **not** independently publish messages or other unguarded
 durable results. Publication after lease loss returns false instead of creating
-a second answer. Full model metadata, citation validation, context construction
-and LangGraph behavior are BE-10/BE-11 work; no fake handler is wired in production.
+a second answer. Completion saves model/personality/reasoning/temperature settings,
+validated citations and compact generation metadata in the same transaction.
+Summary watermark/token-budget improvements remain BE-11.
 
 An ordinary handler exception records a generic `HANDLER_FAILED`, clears its
 lease and does not retry inference automatically. Ordinary return/exception means
@@ -142,3 +141,89 @@ fake handlers and real PostgreSQL locking/transactions; they never load a model
 or use the GPU. Coverage includes contention, shared admission, SKIP LOCKED,
 lease fencing, heartbeat, orphan recovery, result publication, handler failures,
 shutdown drain/timeout, cancellation-resistant handlers and FastAPI lifecycle.
+
+
+## GenerateReply input and output (BE-10)
+
+Start in handler.py: `_load_input()` reads the owned running run, validates its
+stored ChatSettings, checks the live chat/ready submission and original user message,
+and verifies all submitted files remain ready with an index generation. A
+short DB read ends before inference starts. The newest 20 prior messages are
+selected by (created_at, id), then reversed to chronological order. Current input
+is appended once, with uploaded filenames for file-only sends. Future messages,
+other chats and deleted messages are excluded. Existing summary text is prepended;
+this step does not regenerate summaries or implement a token-budget memory policy.
+
+`__call__()` passes the saved settings and server-bound conversation UUID to
+LocalMindAI.chat(). RunResult contains nonblank text, deduplicated citation UUIDs
+and at most 8 KiB of JSON metadata. The production graph returns only candidate
+count, winner ID, ranking counts/latency, parse-fallback flag and tournament counts;
+it does not persist prompts, tool contents or losing answers. Message history
+exposes this generation_metadata field; historical messages return null.
+
+Completion locks the conversation before run/document rows, validates lease and
+cancellation again, and keeps only same-chat, ready, undeleted citations. A source
+deleted during generation is omitted at final persistence. Foreign/missing
+citations cannot be linked. The lease is checked again after writes, before the
+transaction can commit; a late attempt rolls back its assistant message.
+
+Each candidate request may call tools. Empty responses and tool-loop exhaustion
+are failures, not assistant text. Generation waits for all sibling requests before
+raising an ordinary candidate failure. Connection failures, timeouts and HTTP 5xx
+model failures become COMPUTE_STATE_UNKNOWN: remote stoppage is unconfirmed, so
+the slot remains held until an operator verifies compute stopped and acknowledges
+interruption. Model requests have a 120-second timeout and SDK retries disabled;
+no application retry regenerates a failed/interrupted answer automatically.
+
+No run/SSE/cancel endpoints are added here. Use the existing submission lookup for
+saved IDs and paginated message history for completed answers; live run/event APIs
+arrive in later tasks. ranking_group_size remains a saved contract until BE-12;
+the current tournament algorithm still groups at most three candidates per match.
+
+## Example queued task record
+
+An AI task is a row in `runs`, shown below as abbreviated JSON. The question is
+stored in the linked `messages` row; the run is not a serialized Python function.
+Timestamps and optional fields are omitted here for readability.
+
+```json
+{
+  "id": "30000000-0000-4000-8000-000000000001",
+  "conversation_id": "10000000-0000-4000-8000-000000000001",
+  "submission_id": "20000000-0000-4000-8000-000000000001",
+  "message_id": "40000000-0000-4000-8000-000000000001",
+  "status": "queued",
+  "settings_snapshot": {
+    "model_name": "qwen2.5-3b-instruct-q4_k_m",
+    "personality": "general",
+    "reasoning_mode": "high",
+    "temperature": 0.7,
+    "tools_enabled": true,
+    "ranking_group_size": 3
+  },
+  "attempt": 0,
+  "cancel_requested": false,
+  "lease_owner": null,
+  "lease_expires_at": null,
+  "result_message_id": null,
+  "error": null
+}
+```
+
+```json
+{
+  "id": "40000000-0000-4000-8000-000000000001",
+  "conversation_id": "10000000-0000-4000-8000-000000000001",
+  "submission_id": "20000000-0000-4000-8000-000000000001",
+  "role": "user",
+  "content": "Explain how tournament-based reasoning works."
+}
+```
+
+`claim_next()` requires a queued, uncancelled, unowned run, a ready submission,
+a live conversation and a free shared execution slot. It changes the run to
+running, increments attempt, assigns a unique owner and sets lease expiry to
+DB time plus 30 seconds by default. GenerateReply then loads the linked input.
+File sends start pending; the indexing worker queues them only after all files
+are ready. Repeated checks find persisted rows even after a backend restart;
+interrupted inference is not automatically restarted.
