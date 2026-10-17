@@ -217,7 +217,7 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_embedding_failure_cleans_partial_vectors_and_retry_preserves_ids(self):
         """Retry one partially indexed file without reindexing its already-ready sibling."""
         send = await self.send([("good.txt", b"good alpha"), ("retry.txt", b"retry beta")])
-        original_write = self.index.upsert_batch
+        original_write = self.index.generate_embeddings_and_upsert_chunk_vectors
         failure_injected = False
 
         def fail_after_write(claim, chunks, start_index):
@@ -228,7 +228,9 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 failure_injected = True
                 raise RuntimeError("private embedding text must stay out of errors")
 
-        with patch.object(self.index, "upsert_batch", fail_after_write):
+        with patch.object(
+            self.index, "generate_embeddings_and_upsert_chunk_vectors", fail_after_write
+        ):
             worker = await self.start_worker()
             await self.wait_for_state(Submission, send["submission_id"], "failed")
             good_id = next(
@@ -238,7 +240,7 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await worker.stop()
         self.assertEqual((await self.row(Run, send["run_id"]))["status"], "failed")
         self.assertIsNone(
-            await RunStore(self.sessions).claim_next(
+            await RunStore(self.sessions).reserve_next_queued_run_for_worker(
                 worker_id="ai", lease_seconds=30, max_concurrency=1
             )
         )
@@ -264,7 +266,7 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         """Recover a partial old generation, delete its vectors and reject its late DB update."""
         send = await self.send([("old.txt", b"new safe text")])
         old_claim = await self.claim()
-        self.index.upsert_batch(
+        self.index.generate_embeddings_and_upsert_chunk_vectors(
             old_claim, [Document(page_content="stale content", metadata={"source": "old.txt"})], 0
         )
         self.assertEqual(await self.retriever.search(self.conversation_id, "stale"), [])
@@ -288,8 +290,8 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.send([("one.txt", b"alpha")])
         claim = await self.claim()
         chunks = [Document(page_content="alpha", metadata={"source": "one.txt"})]
-        self.index.upsert_batch(claim, chunks, 0)
-        self.index.upsert_batch(claim, chunks, 0)
+        self.index.generate_embeddings_and_upsert_chunk_vectors(claim, chunks, 0)
+        self.index.generate_embeddings_and_upsert_chunk_vectors(claim, chunks, 0)
         self.assertEqual(self.index.collection.count(), 1)
 
     async def test_retrieval_filters_chat_ready_generation_and_deletion(self):
@@ -519,7 +521,7 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         send = await self.send([("native.txt", b"alpha")])
         started, released = threading.Event(), threading.Event()
-        original_write = self.index.upsert_batch
+        original_write = self.index.generate_embeddings_and_upsert_chunk_vectors
 
         def delayed_write(claim, chunks, offset):
             """Hold a native write until the case verifies cancellation did not release the lock."""
@@ -532,7 +534,9 @@ class IndexingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             """Return one in-memory section so this case controls only the embedding thread."""
             return [DocumentSection("alpha")]
 
-        with patch.object(self.index, "upsert_batch", delayed_write):
+        with patch.object(
+            self.index, "generate_embeddings_and_upsert_chunk_vectors", delayed_write
+        ):
             worker = await self.start_worker(parser=local_parser)
             self.assertTrue(await asyncio.to_thread(started.wait, 2))
             try:

@@ -8,6 +8,7 @@ from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.backend.api.errors import ApiError
+from src.backend.execution.events import update_state_and_add_run_event
 from src.backend.api.v1.pagination import HistoryCursor, decode_cursor, encode_cursor
 from src.backend.api.v1.schemas import DocumentPage, DocumentResponse
 from src.backend.database.models import Attachment, Run, Submission
@@ -187,3 +188,4 @@ async def delete_document(session: AsyncSession, conversation_id: UUID, document
                 submission = await session.get(Submission, document.submission_id)
                 submission.status = "failed"
                 submission.error = error
+                await update_state_and_add_run_event(session, run, "run.failed", {"error": error})

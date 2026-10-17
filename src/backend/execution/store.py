@@ -16,6 +16,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.backend.database.models import Attachment, Conversation, Message, Run, Submission
+from src.backend.execution.events import update_state_and_add_run_event
 
 ADMISSION_LOCK_KEY = 1280134734
 LEASED_STATUSES = ("running", "cancel_requested")
@@ -87,7 +88,7 @@ class RunStore:
         """Save the session factory; do not open a database connection yet."""
         self.sessions = sessions
 
-    async def claim_next(
+    async def reserve_next_queued_run_for_worker(
         self, *, worker_id: str, lease_seconds: float, max_concurrency: int
     ) -> RunClaim | None:
         """Reserve the oldest eligible queued run for this worker.
@@ -144,6 +145,9 @@ class RunStore:
             run.updated_at = func.clock_timestamp()
             run.attempt += 1
             await session.flush()
+            await update_state_and_add_run_event(
+                session, run, "run.started", {"attempt": run.attempt}
+            )
             return RunClaim(
                 run_id=run.id,
                 conversation_id=run.conversation_id,
@@ -170,7 +174,7 @@ class RunStore:
             Run.lease_expires_at > func.clock_timestamp(),
         )
 
-    async def heartbeat(
+    async def extend_run_reservation_and_get_cancellation_status(
         self, claim: RunClaim, *, lease_seconds: float
     ) -> Literal["active", "cancel_requested", "lost"]:
         """Extend the claim's reservation and report whether the worker should continue.
@@ -199,7 +203,9 @@ class RunStore:
                 return "cancel_requested"
             return "active"
 
-    async def complete(self, claim: RunClaim, result: RunResult) -> bool:
+    async def save_assistant_reply_and_mark_run_completed(
+        self, claim: RunClaim, result: RunResult
+    ) -> bool:
         """Save one assistant reply and mark its run completed in the same transaction.
 
         claim identifies the execution; result contains answer text, citation UUIDs
@@ -287,6 +293,16 @@ class RunStore:
             run.updated_at = func.clock_timestamp()
             run.lease_owner = None
             run.lease_expires_at = None
+            await update_state_and_add_run_event(
+                session,
+                run,
+                "run.completed",
+                {
+                    "result_message_id": str(message.id),
+                    "result_url": f"/api/v1/runs/{run.id}/result",
+                    "winner_id": result.generation_metadata.get("winner_candidate_id"),
+                },
+            )
             return True
 
     async def fail(self, claim: RunClaim) -> bool:
@@ -315,6 +331,11 @@ class RunStore:
                 )
                 .returning(Run.id)
             )
+            if failed is not None:
+                run = await session.get(Run, failed)
+                await update_state_and_add_run_event(
+                    session, run, "run.failed", {"error": run.error}
+                )
             return failed is not None
 
     async def interrupt(self, claim: RunClaim, *, code: str) -> bool:
@@ -347,6 +368,11 @@ class RunStore:
                 )
                 .returning(Run.id)
             )
+            if interrupted is not None:
+                run = await session.get(Run, interrupted)
+                await update_state_and_add_run_event(
+                    session, run, "run.interrupted", {"error": run.error, "compute_stopped": False}
+                )
             return interrupted is not None
 
     async def recover_expired_leases(self) -> int:
@@ -382,9 +408,14 @@ class RunStore:
                 }
                 run.finished_at = func.clock_timestamp()
                 run.updated_at = func.clock_timestamp()
+                await update_state_and_add_run_event(
+                    session, run, "run.interrupted", {"error": run.error, "compute_stopped": False}
+                )
             return len(expired)
 
-    async def acknowledge_interruption(self, run_id: UUID, *, expected_owner: str) -> bool:
+    async def release_interrupted_run_slot_after_compute_stop_confirmed(
+        self, run_id: UUID, *, expected_owner: str
+    ) -> bool:
         """Release an interrupted run's slot after the caller confirms compute has stopped.
 
         run_id identifies the run; expected_owner must match its saved owner token.
@@ -409,4 +440,47 @@ class RunStore:
                 )
                 .returning(Run.id)
             )
+            if released is not None:
+                run = await session.get(Run, released)
+                await update_state_and_add_run_event(
+                    session, run, "run.compute_stopped", {"compute_stopped": True}
+                )
             return released is not None
+
+    async def confirm_cancellation(self, claim: RunClaim) -> bool:
+        """Mark a requested cancellation complete only after the handler has stopped safely.
+
+        Args:
+            claim: Current owner/attempt whose handler finished all model/tool siblings.
+
+        Returns:
+            True after committing cancelled, releasing the slot and appending its event.
+            False if cancellation was not requested or ownership/expiry changed.
+
+        Do not call after forced task cancellation or uncertain remote inference.
+        Those cases must remain interrupted with the slot held.
+        """
+        async with self.sessions() as session, session.begin():
+            conversation = await session.scalar(
+                select(Conversation)
+                .where(Conversation.id == claim.conversation_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                select(Run)
+                .where(self._owned_lease(claim), Run.cancel_requested.is_(True))
+                .with_for_update()
+            )
+            if conversation is None or run is None:
+                return False
+            run.status = "cancelled"
+            run.finished_at = func.clock_timestamp()
+            run.updated_at = func.clock_timestamp()
+            run.lease_owner = None
+            run.lease_expires_at = None
+            submission = await session.get(Submission, run.submission_id)
+            submission.status = "cancelled"
+            await update_state_and_add_run_event(
+                session, run, "run.cancelled", {"compute_stopped": True}
+            )
+            return True

@@ -15,7 +15,7 @@ from src.backend.indexing.config import IndexingSettings
 from src.backend.indexing.errors import DocumentIndexingError
 from src.backend.indexing.parsing import parse_document
 from src.backend.indexing.parser_process import DocumentSection, extract_sections
-from src.backend.indexing.vectors import split_sections
+from src.backend.indexing.vectors import split_extracted_sections_into_document_chunks
 
 
 class DocumentParsingTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +33,9 @@ class DocumentParsingTests(unittest.IsolatedAsyncioTestCase):
         self.file_path.write_text('print("hello")', encoding="utf-8")
         sections = await parse_document(self.file_path, "example.py", self.settings)
         self.assertEqual(sections, [DocumentSection('print("hello")')])
-        chunks = split_sections(sections, "example.py", self.settings)
+        chunks = split_extracted_sections_into_document_chunks(
+            sections, "example.py", self.settings
+        )
         self.assertEqual(chunks[0].metadata["source"], "example.py")
         self.assertNotIn(self.temporary.name, str(chunks[0].metadata))
 
@@ -74,7 +76,7 @@ class DocumentParsingTests(unittest.IsolatedAsyncioTestCase):
     async def test_chunk_limit_rejects_excessive_embedding_work(self):
         """Stop splitting when a valid text document would produce too many chunks."""
         with self.assertRaises(DocumentIndexingError) as caught:
-            split_sections(
+            split_extracted_sections_into_document_chunks(
                 [DocumentSection("word " * 100)], "text.txt", replace(self.settings, max_chunks=1)
             )
         self.assertEqual(caught.exception.code, "TOO_MANY_CHUNKS")

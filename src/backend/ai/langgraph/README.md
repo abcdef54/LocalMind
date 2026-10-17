@@ -26,4 +26,5 @@ N=5, K=5 or 7 → 1 ranking call
 ```
 
 Group size does not regenerate candidates, change prompts or add visualization calls.
-Live tournament events/animation remain BE-13/14.
+BE-13 emits real completion/match/bye/fallback events through an optional progress recorder.
+BE-14 persists/streams them; frontend animation remains part of the UI overhaul.

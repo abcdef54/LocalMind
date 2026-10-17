@@ -145,6 +145,8 @@ async def invoke_model(model, messages):
         ValueError: Message/tool input plus reserved output exceeds context capacity.
         InferenceStateUnknown: Connection loss, timeout or server failure leaves
             remote computation unconfirmed. No automatic model retry is attempted.
+        RunCancellationRequested: A checkpoint observes cancellation before a new
+            call or after the current response has safely returned.
         Exception: Other model errors propagate; no error text becomes an answer.
     """
     import httpx
@@ -169,11 +171,17 @@ async def invoke_model(model, messages):
     reserved_output = max(settings.reply_tokens, output_limit)
     if request_size > settings.context_tokens - reserved_output:
         raise ValueError("Model request exceeds the configured context budget")
+    from src.backend.execution.control import check_run_control
+
+    await check_run_control()
     try:
-        return await model.ainvoke(messages)
+        response = await model.ainvoke(messages)
     except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
         raise InferenceStateUnknown("Remote inference state is unknown") from error
     except APIStatusError as error:
         if error.status_code >= 500:
             raise InferenceStateUnknown("Remote inference state is unknown") from error
         raise
+
+    await check_run_control()
+    return response

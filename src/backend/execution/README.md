@@ -19,7 +19,7 @@ This application's flow:
 Browser → HTTP endpoint → save message/run in PostgreSQL → HTTP 202
                                   ↑
 Background worker polls PostgreSQL → reserve run → AI inference → save answer
-Browser → message API → read the saved answer (live SSE delivery comes later)
+Browser → run snapshot + SSE progress → GET result_url for the saved answer
 ```
 
 When the user submits a new question without files, the API saves the question in
@@ -41,6 +41,8 @@ This example is shown as JSON; creation/update timestamps are omitted.
     "tools_enabled": true,
     "ranking_group_size": 3
   },
+  "event_sequence": 1,
+  "visualization": {"phase": "queued"},
   "attempt": 0,
   "cancel_requested": false,
   "lease_owner": null,
@@ -52,7 +54,8 @@ This example is shown as JSON; creation/update timestamps are omitted.
 }
 ```
 
-The API returns HTTP 202 after saving the send. A background worker inside the
+The API returns HTTP 202 after saving the send. The frontend can immediately
+read the run snapshot and open SSE while the worker processes it. A background worker inside the
 backend Python process checks PostgreSQL about once per second by default. It is
 an async task running alongside HTTP handling, not a separate OS process.
 
@@ -90,11 +93,11 @@ For a send containing files, the run initially has status `pending`. It becomes
 `queued` only after all its uploaded files are ready.
 
 When generation finishes, the handler returns the answer and citation IDs to the
-executor. `RunStore.complete()` rechecks the reservation and saves the assistant
+executor. `RunStore.save_assistant_reply_and_mark_run_completed()` rechecks the reservation and saves the assistant
 message, citations, settings, generation metadata and completed run in one
-transaction. The frontend retrieves the saved answer through the message API;
-it does not arrive through the already-finished Send request. Live SSE delivery
-is planned for a later task.
+transaction. The frontend reads the run snapshot, subscribes to saved events through SSE, and
+fetches `result_url` when completed. The answer does not arrive through the
+already-finished Send request. The message-history API still includes that answer.
 
 ```text
 User presses Send
@@ -106,7 +109,7 @@ Text-only → run queued; files → run pending until all indexing succeeds
 
 app.py startup → executor.start() → schedule RunExecutor._dispatch()
         ↓
-RunStore.claim_next() checks PostgreSQL for eligible queued work
+RunStore.reserve_next_queued_run_for_worker() checks PostgreSQL for eligible queued work
 No task / no free slot? → wait about 1 second → check again
         ↓ task found
 Reserve slot: run running + owner token + lease expiry + attempt
@@ -119,12 +122,20 @@ _load_input() → ConversationMemory: update summary + budgeted recent history +
 LocalMindAI.chat() → LangGraph → invoke_model() → model.ainvoke()
 HTTP request to llama-swap → candidates + optional RAG → tournament winner
         ↓
-Return RunResult to executor; RunStore.complete() rechecks lease/cancel/citations
+Return RunResult to executor; RunStore.save_assistant_reply_and_mark_run_completed() rechecks lease/cancel/citations
         ↓
 Commit assistant + citations + settings + metadata + completed run together
         ↓
-Frontend GET /api/v1/conversations/{id}/messages → saved answer
-Live SSE delivery is planned; the worker does not push into the old Send response
+Frontend GET /api/v1/runs/{run_id} → snapshot at sequence S
+        ↓
+GET /api/v1/runs/{run_id}/events?after=S → live candidate/match/status events
+        ↓
+run.completed → GET result_url → saved answer
+Disconnect → reconnect with Last-Event-ID; the AI job continues independently
 ```
 
 [Configuration and failure/recovery details](REFERENCE.md).
+
+Cancellation is cooperative: an in-flight model request keeps `cancel_requested`
+until a safe boundary confirms it ended. Unknown remote compute stays interrupted
+with its slot held. Retry is explicit and cannot bypass that confirmation.

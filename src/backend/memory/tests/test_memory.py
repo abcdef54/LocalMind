@@ -35,7 +35,7 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
     async def make_memory(self, contents):
         """Create a claimed send with ordered prior messages; return service and IDs."""
         self.seed_run()
-        claim = await self.store.claim_next(
+        claim = await self.store.reserve_next_queued_run_for_worker(
             worker_id="memory", lease_seconds=120, max_concurrency=1
         )
         now = datetime(2026, 10, 17, 12)
@@ -72,7 +72,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
             [f"history-{index}" for index in range(7)]
         )
         settings = ChatSettings(model_name="fake")
-        messages = await memory.prepare(claim, settings, "current", position)
+        messages = await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, settings, "current", position
+        )
         summarized = [
             message["content"]
             for call in ai.summarize_conversation.call_args_list
@@ -83,7 +85,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
             [message["content"] for message in messages[1:]], ["history-5", "history-6", "current"]
         )
         self.assertEqual(ai.summarize_conversation.await_count, 3)
-        again = await memory.prepare(claim, settings, "current", position)
+        again = await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, settings, "current", position
+        )
         self.assertEqual(again, messages)
         self.assertEqual(ai.summarize_conversation.await_count, 3)
         with self.engine.connect() as connection:
@@ -101,7 +105,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
         )
         ai.summarize_conversation.side_effect = ["first batch", ValueError("model failure")]
         with self.assertRaises(ValueError):
-            await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+            await memory.summarize_old_history_and_build_messages_for_inference(
+                claim, ChatSettings(model_name="fake"), "current", position
+            )
         with self.engine.connect() as connection:
             row = connection.execute(
                 sa.select(Conversation).where(Conversation.id == claim.conversation_id)
@@ -111,7 +117,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
         ai.summarize_conversation.reset_mock()
         ai.summarize_conversation.side_effect = None
         ai.summarize_conversation.return_value = "new facts"
-        await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+        await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, ChatSettings(model_name="fake"), "current", position
+        )
         contents = [
             message["content"]
             for call in ai.summarize_conversation.call_args_list
@@ -128,14 +136,18 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
                 .where(Conversation.id == claim.conversation_id)
                 .values(summary="unknown coverage")
             )
-        messages = await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+        messages = await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, ChatSettings(model_name="fake"), "current", position
+        )
         self.assertEqual([row["content"] for row in messages], ["old", "recent", "current"])
         ai.summarize_conversation.assert_not_awaited()
 
     async def test_large_recent_messages_move_into_summary_to_fit_budget(self):
         """Token estimate, not just message count, determines how much raw history fits."""
         memory, ai, claim, position = await self.make_memory(["a" * 5000, "b" * 5000])
-        messages = await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+        messages = await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, ChatSettings(model_name="fake"), "current", position
+        )
         self.assertEqual(messages[-2]["content"], "b" * 5000)
         self.assertEqual(ai.summarize_conversation.call_args.args[1][0]["content"], "a" * 5000)
         self.assertLess(
@@ -145,7 +157,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
             - memory.settings.tool_tokens,
         )
         with self.assertRaises(ValueError):
-            await memory.prepare(claim, ChatSettings(model_name="fake"), "x" * 20000, position)
+            await memory.summarize_old_history_and_build_messages_for_inference(
+                claim, ChatSettings(model_name="fake"), "x" * 20000, position
+            )
 
     async def test_oversized_message_is_fully_processed_before_advancing_boundary(self):
         """Splitting old Unicode text must preserve all content and never checkpoint a partial row."""
@@ -153,7 +167,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
         memory, ai, claim, position = await self.make_memory([content])
         ai.summarize_conversation.side_effect = ["partial", ValueError("fail")]
         with self.assertRaises(ValueError):
-            await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+            await memory.summarize_old_history_and_build_messages_for_inference(
+                claim, ChatSettings(model_name="fake"), "current", position
+            )
         with self.engine.connect() as connection:
             self.assertIsNone(
                 connection.scalar(
@@ -165,7 +181,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
         ai.summarize_conversation.reset_mock()
         ai.summarize_conversation.side_effect = None
         ai.summarize_conversation.return_value = "all facts"
-        messages = await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+        messages = await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, ChatSettings(model_name="fake"), "current", position
+        )
         pieces = [
             message["content"]
             for call in ai.summarize_conversation.call_args_list
@@ -188,7 +206,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
 
         ai.summarize_conversation.side_effect = lose_lease
         with self.assertRaises(ValueError):
-            await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+            await memory.summarize_old_history_and_build_messages_for_inference(
+                claim, ChatSettings(model_name="fake"), "current", position
+            )
         with self.engine.connect() as connection:
             self.assertIsNone(
                 connection.scalar(
@@ -214,7 +234,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
 
         ai.summarize_conversation.side_effect = change_summary
         with self.assertRaises(ValueError):
-            await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+            await memory.summarize_old_history_and_build_messages_for_inference(
+                claim, ChatSettings(model_name="fake"), "current", position
+            )
         with self.engine.connect() as connection:
             self.assertEqual(
                 connection.scalar(
@@ -244,7 +266,9 @@ class ConversationMemoryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 .values(created_at=timestamp)
             )
-        await memory.prepare(claim, ChatSettings(model_name="fake"), "current", position)
+        await memory.summarize_old_history_and_build_messages_for_inference(
+            claim, ChatSettings(model_name="fake"), "current", position
+        )
         covered = [
             row["content"]
             for call in ai.summarize_conversation.call_args_list

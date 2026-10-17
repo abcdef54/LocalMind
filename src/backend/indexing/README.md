@@ -16,10 +16,10 @@ parsing.py → parse_document() starts a separate parser process
 parser_process.py → extract_sections()
 Reads PDF/DOCX/text and returns extracted text with page information
         ↓
-vectors.py → split_sections()
+vectors.py → split_extracted_sections_into_document_chunks()
 Divides extracted text into smaller overlapping chunks
         ↓
-vectors.py → upsert_batch()
+vectors.py → generate_embeddings_and_upsert_chunk_vectors()
 Generates embeddings and writes chunks to Chroma
         ↓
 store.py → finish()

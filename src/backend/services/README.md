@@ -19,6 +19,7 @@ Validate live conversation → query cursor-bounded rows
         ↓
 Build messages with attachments and scoped citations
 
+Run request → runs.py → snapshot / saved result / cooperative cancel / guarded retry
 Document request → documents.py → scoped list / content / mark as deleted
 Accepted send → execution/handler.py → AI generation outside HTTP
 Legacy /conversation → conversation_services.py → conversation reads/metadata

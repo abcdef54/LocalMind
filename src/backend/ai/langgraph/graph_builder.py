@@ -43,6 +43,7 @@ class LocalMindAI:
         tools_enabled: bool = True,
         conversation_id: UUID | None = None,
         ranking_group_size: int = DEFAULT_RANKING_GROUP_SIZE,
+        progress_recorder=None,
     ) -> dict:
         """Run generation/ranking with a document tool restricted to the selected chat.
 
@@ -56,6 +57,7 @@ class LocalMindAI:
             conversation_id: Backend-selected UUID required when tools are enabled;
                 omitted for tool-free summarization. Never supplied by model arguments.
             ranking_group_size: Maximum candidates per ranking match, strict integer 2..7.
+            progress_recorder: Optional async progress recorder; omitted for standalone benchmarks.
 
         Returns:
             Final answer, winning citation IDs and compact tournament metadata;
@@ -90,6 +92,7 @@ class LocalMindAI:
                 "personality": personality,
                 "tools_enabled": tools_enabled,
                 "ranking_group_size": ranking_group_size,
+                "progress_recorder": progress_recorder,
                 "conversation_id": str(conversation_id) if conversation_id is not None else None,
             }
         }
@@ -176,6 +179,7 @@ class LocalMindAI:
         tools_enabled: bool = True,
         conversation_id: UUID | None = None,
         ranking_group_size: int = DEFAULT_RANKING_GROUP_SIZE,
+        progress_recorder=None,
     ) -> dict:
         """Call chat with the same arguments and preserve the server's conversation scope.
 
@@ -188,6 +192,7 @@ class LocalMindAI:
             tools_enabled: Whether tools can be invoked.
             conversation_id: Backend chat UUID, required for document retrieval.
             ranking_group_size: Saved maximum candidates per match, from 2 to 7.
+            progress_recorder: Optional run-bound progress recorder forwarded unchanged to chat.
 
         Returns:
             The answer/citation dictionary returned by chat; its errors propagate.
@@ -201,4 +206,5 @@ class LocalMindAI:
             tools_enabled,
             conversation_id,
             ranking_group_size,
+            progress_recorder,
         )

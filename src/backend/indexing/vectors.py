@@ -27,7 +27,7 @@ CODE_LANGUAGES = {
 }
 
 
-def split_sections(
+def split_extracted_sections_into_document_chunks(
     sections: list[DocumentSection], file_name: str, settings: IndexingSettings
 ) -> list[Document]:
     """Split extracted text into bounded chunks, retaining original filename/page metadata.
@@ -94,7 +94,9 @@ class DocumentVectorIndex:
             COLLECTION_NAME, embedding_function=None
         )
 
-    def upsert_batch(self, claim: IndexingClaim, chunks: list[Document], start_index: int) -> None:
+    def generate_embeddings_and_upsert_chunk_vectors(
+        self, claim: IndexingClaim, chunks: list[Document], start_index: int
+    ) -> None:
         """Embed and upsert one bounded batch using stable IDs within this attempt.
 
         Args:

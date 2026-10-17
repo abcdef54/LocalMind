@@ -137,7 +137,9 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         """Reserve one fixture job for worker with a two-second lease and the supplied
         concurrency limit.
         """
-        return await self.store.claim_next(worker_id=worker, lease_seconds=2, max_concurrency=limit)
+        return await self.store.reserve_next_queued_run_for_worker(
+            worker_id=worker, lease_seconds=2, max_concurrency=limit
+        )
 
     def expire(self, run_id):
         """Move run_id's saved expiry into the past to simulate missed heartbeats without
@@ -198,10 +200,24 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
             replace(claim, lease_owner="different"),
             replace(claim, attempt=claim.attempt + 1),
         ):
-            self.assertEqual(await self.store.heartbeat(stale, lease_seconds=2), "lost")
-            self.assertFalse(await self.store.complete(stale, RunResult("Stale answer")))
+            self.assertEqual(
+                await self.store.extend_run_reservation_and_get_cancellation_status(
+                    stale, lease_seconds=2
+                ),
+                "lost",
+            )
+            self.assertFalse(
+                await self.store.save_assistant_reply_and_mark_run_completed(
+                    stale, RunResult("Stale answer")
+                )
+            )
             self.assertFalse(await self.store.fail(stale))
-        self.assertEqual(await self.store.heartbeat(claim, lease_seconds=5), "active")
+        self.assertEqual(
+            await self.store.extend_run_reservation_and_get_cancellation_status(
+                claim, lease_seconds=5
+            ),
+            "active",
+        )
         self.assertEqual((await self.run_row(run_id))["attempt"], 1)
 
     async def test_expired_run_is_interrupted_and_keeps_slot_until_acknowledged(self):
@@ -212,16 +228,31 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         queued_id = self.seed_run()
         claim = await self.claim()
         self.expire(run_id)
-        self.assertEqual(await self.store.heartbeat(claim, lease_seconds=2), "lost")
+        self.assertEqual(
+            await self.store.extend_run_reservation_and_get_cancellation_status(
+                claim, lease_seconds=2
+            ),
+            "lost",
+        )
         self.assertEqual(await self.store.recover_expired_leases(), 1)
         row = await self.run_row(run_id)
         self.assertEqual(row["status"], "interrupted")
         self.assertEqual(row["lease_owner"], claim.lease_owner)
-        self.assertFalse(await self.store.complete(claim, RunResult("Late answer")))
+        self.assertFalse(
+            await self.store.save_assistant_reply_and_mark_run_completed(
+                claim, RunResult("Late answer")
+            )
+        )
         self.assertIsNone(await self.claim())
-        self.assertFalse(await self.store.acknowledge_interruption(run_id, expected_owner="wrong"))
+        self.assertFalse(
+            await self.store.release_interrupted_run_slot_after_compute_stop_confirmed(
+                run_id, expected_owner="wrong"
+            )
+        )
         self.assertTrue(
-            await self.store.acknowledge_interruption(run_id, expected_owner=claim.lease_owner)
+            await self.store.release_interrupted_run_slot_after_compute_stop_confirmed(
+                run_id, expected_owner=claim.lease_owner
+            )
         )
         self.assertEqual((await self.claim()).run_id, queued_id)
         self.assertEqual((await self.run_row(run_id))["status"], "interrupted")
@@ -232,8 +263,16 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         """
         run_id = self.seed_run()
         claim = await self.claim()
-        self.assertTrue(await self.store.complete(claim, RunResult("Winner answer")))
-        self.assertFalse(await self.store.complete(claim, RunResult("Duplicate answer")))
+        self.assertTrue(
+            await self.store.save_assistant_reply_and_mark_run_completed(
+                claim, RunResult("Winner answer")
+            )
+        )
+        self.assertFalse(
+            await self.store.save_assistant_reply_and_mark_run_completed(
+                claim, RunResult("Duplicate answer")
+            )
+        )
         row = await self.run_row(run_id)
         self.assertEqual(row["status"], "completed")
         self.assertIsNone(row["lease_owner"])
@@ -437,7 +476,9 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 stopped.set()
 
         with patch.object(
-            self.store, "heartbeat", AsyncMock(side_effect=ConnectionError("private DSN"))
+            self.store,
+            "extend_run_reservation_and_get_cancellation_status",
+            AsyncMock(side_effect=ConnectionError("private DSN")),
         ):
             with self.assertLogs("uvicorn.error", level="ERROR") as logs:
                 executor = await self.start_executor(handler)
@@ -448,35 +489,33 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row["lease_owner"])
         self.assertFalse(any("private DSN" in entry for entry in logs.output))
 
-    async def test_cancel_flag_interrupts_without_pretending_full_cancel_api_exists(self):
-        """Observe a saved cancellation flag, stop the Python handler and save no final answer."""
+    async def test_cancel_flag_waits_for_handler_to_finish_before_confirming(self):
+        """Keep in-flight compute reserved until the handler returns from a safe boundary."""
         run_id = self.seed_run()
-        started, stopped = asyncio.Event(), asyncio.Event()
+        started, release = asyncio.Event(), asyncio.Event()
 
         async def handler(claim):
-            """Signal startup and wait for cancellation, then signal exit without producing a
-            result.
-            """
+            """Represent a model request that cannot safely be aborted by cancelling HTTP."""
             started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                stopped.set()
+            await release.wait()
+            return RunResult("answer to discard after cancellation")
 
         executor = await self.start_executor(handler)
         await asyncio.wait_for(started.wait(), timeout=2)
-        with self.engine.begin() as connection:
-            connection.execute(
+        async with self.sessions.begin() as session:
+            await session.execute(
                 sa.update(Run)
                 .where(Run.id == run_id)
-                .values(
-                    status="cancel_requested",
-                    cancel_requested=True,
-                )
+                .values(status="cancel_requested", cancel_requested=True)
             )
-        await asyncio.wait_for(stopped.wait(), timeout=2)
-        row = await self.wait_status(run_id, "interrupted")
+        await asyncio.sleep(FAST_SETTINGS.heartbeat_seconds * 2)
+        row = await self.run_row(run_id)
+        self.assertEqual(row["status"], "cancel_requested")
+        self.assertIsNotNone(row["lease_owner"])
+        release.set()
+        row = await self.wait_status(run_id, "cancelled")
         self.assertIsNone(row["result_message_id"])
+        self.assertIsNone(row["lease_owner"])
         await executor.stop()
 
     async def test_shutdown_returns_when_handler_resists_cancellation_and_fences_its_late_result(

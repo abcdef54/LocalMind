@@ -902,6 +902,18 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - Verification cuối: 169 tests pass với PostgreSQL 18 tạm, Chroma thật và model/embeddings giả; gồm migration/counters, summary retry/coverage/budget, K=2..7 và regression toàn bộ backend. Không migrate DB app hoặc gọi GPU.
 - Không thêm model call cho visualization; event instrumentation/SSE vẫn thuộc BE-13/14. Hướng dẫn flow: `memory/README.md` và `ai/langgraph/README.md`.
 
+### BE-13/14/15 — Research events, SSE, cancel/retry: hoàn thành (2026-10-17)
+
+- Instrument graph trực tiếp bằng optional event sink; cấp candidate UUID/display index trước chạy, phát completed từng ứng viên ngay khi xong, vẫn giữ pool input order. Phát round/group started/completed, byes, fallback và final selection thật; không thêm prompt/model call cho animation hoặc đổi bracket rules.
+- Migration `0009_run_events` thêm event sequence/projection và RunEvent theo (run, sequence), có attempt và schema_version=1. Event/projection và lifecycle state commit chung transaction; sequence không reset qua retry. Giữ 1000 events mới nhất mỗi run, payload tối đa 16 KiB; snapshot giữ state sau retention.
+- GET `/api/v1/runs/{id}` trả snapshot + result URL; GET `/result` lấy đúng assistant answer không quét lịch sử. GET `/event-log` replay JSON bounded; GET `/events` SSE theo after/Last-Event-ID, header ưu tiên URL cursor khi auto reconnect. Hết retention trả 410/reset yêu cầu snapshot mới, không replay thiếu như thể đầy đủ.
+- SSE đọc tối đa 100 events/lượt, idle poll 0.5 giây, heartbeat 15 giây, tối đa 32 subscriptions/process. Không giữ transaction trong lúc chờ/gửi; client chậm/disconnect không chặn GPU hoặc hủy run. Không truyền raw candidate answers/tool transcript/model thoughts qua event.
+- POST `/cancel` 202: unclaimed pending/queued được hủy ngay; running giữ cancel_requested và heartbeat trong khi cooperative checkpoints ngăn model/tool call mới. Chỉ cancelled sau mọi sibling calls dừng an toàn; completion/cancel race được bảo vệ bằng row lock/lease, không lưu late answer.
+- Không có GPU-abort protocol được xác minh với llama-swap: mất kết nối/timeout hoặc force cancellation vẫn interrupted, giữ slot. Public API không tự xác nhận GPU đã dừng; operator acknowledgement chỉ dùng sau kiểm tra độc lập.
+- POST `/retry` với expected_attempt: giữ run/input/settings/file IDs, reset projection, chỉ tăng attempt khi claim tiếp. Câu hỏi cũ đã có lượt user mới hơn bị chặn 409 để không tái dùng summary tương lai. Reject stale/active/completed/unknown-compute hoặc chat có active run khác; files chưa ready chờ indexing, file deleted/indexing active trả 409. Không tự retry inference.
+- Verification: 190 tests pass trên PostgreSQL 18 tạm và Chroma thật với model/embeddings giả; gồm concurrency sequence, atomic projection rollback, candidate completion order, byes/fallback, SSE resume/retention và cancel/retry races. Không dùng DB app hoặc GPU thật.
+- Snapshot/event endpoints kiểm tra live conversation và optional expected conversation_id. Frontend reducer/animation sẽ dùng event backend thật trong đợt UI rework; task này không tạo UI animation.
+
 ## 18. Implementation Tasks
 
 | Task | Phạm vi thực hiện | Tiêu chí hoàn thành |

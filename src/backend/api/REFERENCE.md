@@ -81,7 +81,7 @@ alone does not load or verify a model.
 
 BE-12 passes the saved group size to LangGraph. It limits each ranking match,
 independently of candidate count; default K=3 keeps the original bracket behavior.
-Live streaming is not implemented yet.
+Run events stream over SSE; token-by-token answer streaming is not implemented.
 The initial schema cap is 7; capability/configuration delivery belongs to BE-16.
 
 ## Error contract
@@ -208,6 +208,38 @@ POST submissions still returns 202 after acceptance, not after inference. Once
 files are ready, the executor invokes LangGraph and saves one assistant message.
 Read it using the conversation message pages; `run_id` links it to the accepted
 send. Messages include saved generation settings and nullable generation_metadata.
-Ordinary failures create no assistant message; lookup identifies the original send,
-while run status/event/cancel endpoints are scheduled for subsequent tasks.
+Ordinary failures create no assistant message. Run snapshot, result, event and
+cancel/retry endpoints are available below.
 The old direct POST /chat route returns 404 and cannot bypass executor admission.
+
+
+## Run state, live progress and control (BE-13–15)
+
+| Method | Endpoint under `/api/v1/runs/{run_id}` | Behavior |
+|---|---|---|
+| GET | empty suffix | Status/error/settings, attempt, compute_stopped, projection and last sequence |
+| GET | `/result` | Exact saved MessageResponse; 409 until completed |
+| GET | `/event-log?after=0&limit=100` | Bounded JSON event replay; limit 1–100 |
+| GET | `/events?after=0` | SSE with IDs, Last-Event-ID resume and heartbeats |
+| POST | `/cancel` | 202 snapshot; running work first becomes cancel_requested |
+| POST | `/retry` | 202 snapshot; body `{"expected_attempt": 1}` |
+
+Optional `conversation_id` asserts expected scope on every endpoint. Wrong scope
+or archived chats return 404. Last-Event-ID overrides the original URL's after
+on automatic reconnect; malformed/wrong-run IDs return 422. Expired history returns
+410 with snapshot URL, future cursors 409, and subscriber capacity 429. Terminal
+SSE streams close after committed events; clients should close EventSource on a
+terminal event/snapshot. Browser disconnect never cancels work automatically.
+
+Events carry schema_version=1, monotonic sequence, run/conversation IDs, attempt,
+timestamp, type and bounded payload. Snapshot at sequence S resumes only after S.
+Use result_url after completion instead of fetching all conversation messages.
+No candidate answer bodies, tool transcripts, owner tokens or private paths are
+included in the event stream. The last 1000 events are retained; snapshot survives.
+
+Retry is explicit, preserves saved inputs and rejects active/completed/stale or
+compute-unconfirmed runs. An older input after a newer question returns 409
+RUN_INPUT_SUPERSEDED to preserve conversation memory ordering. A lost HTTP model connection cannot establish GPU
+stoppage; interrupted slots remain held until independently confirmed stopped.
+Detailed event vocabulary, examples and cancellation semantics:
+[execution reference](../execution/REFERENCE.md#live-run-events-sse-and-lifecycle-be-13--be-14--be-15).

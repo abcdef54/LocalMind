@@ -134,6 +134,8 @@ claims, leases, recovery and shutdown. BE-10 registers the real LangGraph handle
 which generates replies for ready submissions and saves citations/metadata atomically.
 The [memory module](src/backend/memory/README.md) maintains incremental summaries
 and budgeted context. Ranking match size is configurable independently of candidate count.
+Run snapshots, saved-result lookup, event replay/SSE and cooperative cancel/retry
+are available; the new frontend will use these to visualize the real tournament.
 
 The [submission upload guide](src/backend/uploads/README.md) describes multipart sends,
 filename duplicate checks, upload limits, storage cleanup and integration boundaries.

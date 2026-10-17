@@ -214,3 +214,62 @@ class DocumentPage(BaseModel):
     items: list[DocumentResponse]
     next_cursor: str | None
     has_more: bool
+
+
+class RunRetryInput(BaseModel):
+    """Retry the exact attempt shown by a client snapshot; stale attempts return 409."""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_attempt: Annotated[int, Field(strict=True, ge=0)]
+
+
+class RunSnapshot(BaseModel):
+    """Return canonical state and a visualization snapshot at last_event_sequence.
+
+    Apply only events after that sequence. compute_stopped is False while an
+    interrupted owner still occupies its slot; cancelling HTTP does not change it.
+    """
+
+    id: UUID
+    conversation_id: UUID
+    submission_id: UUID
+    message_id: UUID
+    result_message_id: UUID | None
+    result_url: str | None = None
+    status: str
+    attempt: int
+    settings_snapshot: dict
+    cancel_requested: bool
+    compute_stopped: bool
+    error: dict | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    last_event_sequence: int
+    first_event_sequence: int | None
+    visualization: dict
+    documents: list[dict]
+
+
+class RunEventResponse(BaseModel):
+    """Return one versioned event; id is '<run UUID>:<sequence>' for SSE reconnect."""
+
+    id: str
+    schema_version: Literal[1] = 1
+    sequence: int
+    run_id: UUID
+    conversation_id: UUID
+    attempt: int
+    type: str
+    timestamp: datetime
+    payload: dict
+
+
+class RunEventPage(BaseModel):
+    """Return a bounded ascending event page and its last delivered sequence."""
+
+    items: list[RunEventResponse]
+    next_after: int
+    last_event_sequence: int
+    first_event_sequence: int | None
+    has_more: bool
+    terminal: bool

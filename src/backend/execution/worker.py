@@ -13,6 +13,7 @@ from typing import TypeVar
 from uuid import uuid4
 
 from src.backend.execution.config import ExecutorSettings
+from src.backend.execution.control import RunCancellationRequested
 from src.backend.execution.store import RunClaim, RunResult, RunStore
 
 RunHandler = Callable[[RunClaim], Awaitable[RunResult]]
@@ -99,7 +100,7 @@ class RunExecutor:
                     and not self._stop_requested.is_set()
                 ):
                     claim = await self._database_call(
-                        self.store.claim_next(
+                        self.store.reserve_next_queued_run_for_worker(
                             worker_id=self.worker_id,
                             lease_seconds=self.settings.lease_seconds,
                             max_concurrency=self.settings.max_concurrency,
@@ -164,9 +165,10 @@ class RunExecutor:
             handler_task: Generation task to cancel if its reservation is lost.
             stop_heartbeat: Set when execution ends so an in-flight DB call can finish.
 
-        Wait heartbeat_seconds between updates. On database failure, lost ownership or
-        a cancellation request, try to record interruption and cancel handler_task.
-        Return after that cancellation request; it does not prove model compute stopped.
+        Wait heartbeat_seconds between updates. On database failure or
+        lost ownership, record interruption and cancel handler_task conservatively.
+        A cancellation request keeps renewing the lease while cooperative model/tool
+        checkpoints stop new work. Only the finished handler path confirms cancellation.
         """
         while not stop_heartbeat.is_set():
             try:
@@ -176,7 +178,9 @@ class RunExecutor:
                 pass
             try:
                 state = await self._database_call(
-                    self.store.heartbeat(claim, lease_seconds=self.settings.lease_seconds)
+                    self.store.extend_run_reservation_and_get_cancellation_status(
+                        claim, lease_seconds=self.settings.lease_seconds
+                    )
                 )
             except Exception as exception:
                 logger.error(
@@ -188,8 +192,12 @@ class RunExecutor:
                     await self._interrupt_safely(claim, "HEARTBEAT_FAILED")
                     handler_task.cancel()
                 return
+            if state == "cancel_requested":
+                # Keep renewing while the handler cooperatively stops at a safe
+                # boundary. Cancelling HTTP alone would not confirm GPU stoppage.
+                continue
             if state != "active" and not stop_heartbeat.is_set():
-                code = "CANCEL_REQUESTED" if state == "cancel_requested" else "LEASE_LOST"
+                code = "LEASE_LOST"
                 await self._interrupt_safely(claim, code)
                 handler_task.cancel()
                 return
@@ -219,12 +227,18 @@ class RunExecutor:
             result = await handler_task
             if not isinstance(result, RunResult):
                 raise TypeError("Handler must return RunResult")
-            completed = await self._database_call(self.store.complete(claim, result))
+            completed = await self._database_call(
+                self.store.save_assistant_reply_and_mark_run_completed(claim, result)
+            )
             if not completed:
-                await self._interrupt_safely(claim, "LEASE_LOST_OR_CANCELLED")
+                if not await self._database_call(self.store.confirm_cancellation(claim)):
+                    await self._interrupt_safely(claim, "LEASE_LOST_OR_CANCELLED")
         except asyncio.CancelledError:
             await self._interrupt_safely(claim, "EXECUTION_STOPPED")
             raise
+        except RunCancellationRequested:
+            if not await self._database_call(self.store.confirm_cancellation(claim)):
+                await self._interrupt_safely(claim, "LEASE_LOST_OR_CANCELLED")
         except ComputeStateUnknown:
             await self._interrupt_safely(claim, "COMPUTE_STATE_UNKNOWN")
         except Exception as exception:
@@ -234,7 +248,8 @@ class RunExecutor:
                 type(exception).__name__,
             )
             try:
-                if not await self._database_call(self.store.fail(claim)):
+                cancelled = await self._database_call(self.store.confirm_cancellation(claim))
+                if not cancelled and not await self._database_call(self.store.fail(claim)):
                     await self._interrupt_safely(claim, "LEASE_LOST_OR_CANCELLED")
             except Exception as database_error:
                 logger.error(

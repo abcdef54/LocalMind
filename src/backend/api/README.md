@@ -14,6 +14,7 @@ v1/schemas.py validates input; dependencies provide DB session
 Conversation route → services/conversation_history.py
 Submission route  → uploads receiver → services/submissions.py
 Document route  → services/documents.py → metadata / content / mark as deleted
+Run route       → services/runs.py + execution/replay.py → state / events / control
 Indexing retry    → indexing/store.py → reset failed files
         ↓
 Service commits changes / reads a bounded page

@@ -96,7 +96,7 @@ class ConversationMemory:
             ):
                 raise ValueError("Run reservation expired before summary commit")
 
-    async def prepare(
+    async def summarize_old_history_and_build_messages_for_inference(
         self,
         claim: RunClaim,
         chat_settings: ChatSettings,

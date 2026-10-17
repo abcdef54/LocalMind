@@ -14,7 +14,10 @@ from src.backend.indexing.errors import DocumentIndexingError
 from src.backend.indexing.parsing import parse_document
 from src.backend.indexing.parser_process import DocumentSection
 from src.backend.indexing.store import IndexingClaim, IndexingStore
-from src.backend.indexing.vectors import DocumentVectorIndex, split_sections
+from src.backend.indexing.vectors import (
+    DocumentVectorIndex,
+    split_extracted_sections_into_document_chunks,
+)
 from src.backend.uploads.storage import run_file_operation
 
 logger = logging.getLogger("uvicorn.error")
@@ -201,10 +204,14 @@ class IndexingWorker:
             Exception: For vector/embedding IO failures; the worker saves a generic code.
         """
         sections = await self.parser(claim.file_path, claim.file_name, self.settings)
-        chunks = await run_file_operation(split_sections, sections, claim.file_name, self.settings)
+        chunks = await run_file_operation(
+            split_extracted_sections_into_document_chunks, sections, claim.file_name, self.settings
+        )
         for offset in range(0, len(chunks), self.settings.embedding_batch_size):
             batch = chunks[offset : offset + self.settings.embedding_batch_size]
-            await run_file_operation(self.vector_index.upsert_batch, claim, batch, offset)
+            await run_file_operation(
+                self.vector_index.generate_embeddings_and_upsert_chunk_vectors, claim, batch, offset
+            )
         return len(chunks)
 
     async def _index_one(self, claim: IndexingClaim) -> None:

@@ -19,7 +19,8 @@ LangGraph → N candidates → optional RAG → tournament with saved group size
         ↓
 Guarded transaction → save assistant + citations + metadata → run completed
         ↓
-GET /api/v1/conversations/{id}/messages → bounded history page
+Frontend → run snapshot → SSE after sequence S → GET result_url
+Message history remains paginated independently
 
 Shutdown → stop workers; retain slots if remote compute is uncertain
 ```

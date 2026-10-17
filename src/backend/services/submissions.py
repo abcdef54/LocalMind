@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.backend.api.errors import ApiError
+from src.backend.execution.events import update_state_and_add_run_event
 from src.backend.api.v1.schemas import DocumentResponse, SubmissionInput, SubmissionResponse
 from src.backend.database.models import (
     ACTIVE_RUN_STATUSES,
@@ -257,6 +258,13 @@ async def _create_submission_records(
             )
         )
     await session.flush()
+    run = await session.scalar(select(Run).where(Run.submission_id == submission.id))
+    await update_state_and_add_run_event(
+        session,
+        run,
+        "run.pending" if has_files else "run.queued",
+        {"submission_id": str(submission.id)},
+    )
     return submission
 
 

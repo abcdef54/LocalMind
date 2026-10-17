@@ -9,6 +9,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.backend.api.errors import ApiError
+from src.backend.execution.events import update_state_and_add_run_event
 from src.backend.database.models import (
     ACTIVE_RUN_STATUSES,
     Attachment,
@@ -189,6 +190,11 @@ class IndexingStore:
                     .values(status="indexing", error=None)
                 )
             await session.flush()
+            if attachment.submission_id is not None and run.status == "pending":
+                run = await session.scalar(select(Run).where(Run.id == run.id).with_for_update())
+                await update_state_and_add_run_event(
+                    session, run, "documents.indexing", {"document_id": str(attachment.id)}
+                )
             return IndexingClaim(
                 attachment.id,
                 attachment.conversation_id,
@@ -306,6 +312,16 @@ class IndexingStore:
             attachment.index_expires_at = None
             await session.flush()
             if claim.submission_id is not None:
+                run = await session.scalar(
+                    select(Run).where(Run.submission_id == claim.submission_id).with_for_update()
+                )
+                if run is not None and run.status == "pending":
+                    await update_state_and_add_run_event(
+                        session,
+                        run,
+                        "documents.ready" if error_code is None else "documents.failed",
+                        {"document_id": str(attachment.id)},
+                    )
                 await self._update_waiting_submission(session, claim.submission_id)
             return True
 
@@ -349,6 +365,9 @@ class IndexingStore:
                 run.status = "failed"
                 run.error = dict(submission.error)
                 run.finished_at = func.clock_timestamp()
+                await update_state_and_add_run_event(
+                    session, run, "run.failed", {"error": run.error}
+                )
         elif attachments and all(
             file.status == "ready" and file.index_generation is not None for file in attachments
         ):
@@ -357,6 +376,13 @@ class IndexingStore:
             if run.status == "pending":
                 run.status = "queued"
                 run.error = None
+                await update_state_and_add_run_event(
+                    session,
+                    run,
+                    "documents.ready",
+                    {"document_ids": [str(file.id) for file in attachments]},
+                )
+                await update_state_and_add_run_event(session, run, "run.queued", {})
 
     async def recover_expired(self) -> int:
         """Return expired indexing attempts to pending so a worker can rebuild them.
@@ -481,4 +507,8 @@ async def retry_submission_indexing(
         run.error = None
         run.finished_at = None
         await session.flush()
+        await update_state_and_add_run_event(
+            session, run, "run.retried", {"next_attempt": run.attempt + 1}
+        )
+        await update_state_and_add_run_event(session, run, "run.pending", {})
         return submission

@@ -2,7 +2,7 @@ import asyncio
 import random
 import re
 import time
-from uuid import UUID
+from uuid import UUID, uuid4
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, AIMessage
@@ -21,6 +21,8 @@ from src.backend.ai.langgraph.graph_utils import (
     invoke_model,
 )
 from src.backend.ai.errors import InferenceStateUnknown
+from src.backend.execution.events import emit_graph_event
+from src.backend.execution.control import check_run_control, RunCancellationRequested
 from src.backend.ai.langchain.tools import create_retrieval_tool, fetch_web_page, tavily_search
 
 
@@ -65,6 +67,7 @@ async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> t
     max_iterations = 5
 
     for _ in range(max_iterations):
+        await check_run_control()
         response = await invoke_model(bound_llm, current_messages)
         messages_produced.append(response)
         current_messages.append(response)
@@ -75,6 +78,7 @@ async def _generate_sample_with_tools(llm, messages: list, tools_map: dict) -> t
             break
 
         for tool_call in response.tool_calls:
+            await check_run_control()
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             tool_id = tool_call["id"]
@@ -155,41 +159,82 @@ async def generate(state: AgentState, config: RunnableConfig) -> dict:
     else:
         tools_map = {}
 
-    # Run the generator with tools in parallel for width
-    tasks = [
-        _generate_sample_with_tools(
-            _seeded(llm, random.randint(0, 2**31 - 1)), state["messages"], tools_map
+    # Allocate identities and seeds before scheduling. Events use completion order;
+    # gather preserves input order for pool labels and unchanged bracket behavior.
+    candidate_ids = [uuid4().hex for _ in range(width)]
+    models = [_seeded(llm, random.randint(0, 2**31 - 1)) for _ in range(width)]
+    await emit_graph_event(
+        config,
+        "generation.started",
+        {
+            "candidate_count": width,
+            "ranking_group_size": cfg.get("ranking_group_size", DEFAULT_RANKING_GROUP_SIZE),
+            "candidates": [
+                {"candidate_id": identity, "display_index": index + 1}
+                for index, identity in enumerate(candidate_ids)
+            ],
+        },
+    )
+
+    async def generate_one(index, model):
+        """Emit completion immediately, retaining the preassigned candidate ID and index.
+
+        Args:
+            index: Original zero-based pool position, independent of finish order.
+            model: Candidate model with its already-allocated sampling seed.
+
+        Returns:
+            Completed Candidate; failures propagate after sibling requests finish.
+        """
+        started = time.perf_counter()
+        messages_produced, citations = await _generate_sample_with_tools(
+            model, state["messages"], tools_map
         )
-        for _ in range(width)
-    ]
-    # Wait for every sibling request even if one fails. Returning early would let
-    # the executor release its slot while another candidate is still generating.
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        final_message = messages_produced[-1]
+        candidate = Candidate(
+            id=candidate_ids[index],
+            answer=final_message.content,
+            messages=messages_produced,
+            citations=citations,
+        )
+        await emit_graph_event(
+            config,
+            "candidate.completed",
+            {
+                "candidate_id": candidate.id,
+                "display_index": index + 1,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            },
+        )
+        return candidate
+
+    results = await asyncio.gather(
+        *(generate_one(index, model) for index, model in enumerate(models)), return_exceptions=True
+    )
     failures = [value for value in results if isinstance(value, BaseException)]
     if failures:
         uncertain = next(
             (error for error in failures if isinstance(error, InferenceStateUnknown)), None
         )
-        raise uncertain or failures[0]
-
-    pool = []
+        cancelled = next(
+            (error for error in failures if isinstance(error, RunCancellationRequested)), None
+        )
+        raise uncertain or cancelled or failures[0]
+    pool = list(results)
+    await emit_graph_event(
+        config, "generation.completed", {"candidate_ids": [candidate.id for candidate in pool]}
+    )
     _gen_prompt_text = " ".join(
         m.content for m in state["messages"] if isinstance(getattr(m, "content", None), str)
     )
-    for i, (messages_produced, citations) in enumerate(results):
-        final_msg = messages_produced[-1]
-        content = (
-            final_msg.content if isinstance(final_msg.content, str) else str(final_msg.content)
-        )
-        pool.append(Candidate(answer=content, messages=messages_produced, citations=citations))
-        print(f"[IDX {idx}] Sample {i}: id={pool[-1].id[:8]}")
-        # TEMPORARY token-usage debug (one block per generation call)
+    for index, candidate in enumerate(pool):
+        print(f"[IDX {idx}] Sample {index}: id={candidate.id[:8]}")
         _log_token_usage(
             idx,
             "Generate Call",
-            msg=final_msg,
+            msg=candidate.messages[-1],
             prompt_text=_gen_prompt_text,
-            completion_text=content,
+            completion_text=candidate.answer,
         )
     print(
         f"\n[IDX {idx}] ==========================================================================\n"
@@ -323,6 +368,7 @@ async def tournament_rank(
     llm,
     idx: str = "?",
     group_size: int = DEFAULT_RANKING_GROUP_SIZE,
+    event_config: dict | None = None,
 ) -> tuple[Candidate, int, bool, int, int]:
     """Hierarchical tournament selector — an ORCHESTRATION layer over the existing one-shot ranker;
     it does NOT introduce a new ranking prompt. Each ranking call sees at most group_size (K, default 3)
@@ -337,7 +383,12 @@ async def tournament_rank(
       - parse_failed: True if ANY group call failed to parse a label (a fallback candidate was used).
       - tournament_max_group_size: the largest group actually submitted to a ranking call (0 if none).
     Independent of majority voting; needs no answer-equality key, so it carries over to non-numeric
-    tasks exactly like the one-shot ranker it wraps."""
+    tasks exactly like the one-shot ranker it wraps.
+
+    event_config optionally supplies the run progress recorder. It reports actual shuffle,
+    rounds, matches, byes and fallback outcomes without changing prompts, seeds,
+    pool order or model-call counts. Omit it for direct benchmarks without telemetry.
+    """
     validate_ranking_group_size(group_size)
     if not candidates:
         raise ValueError("Tournament requires at least one candidate")
@@ -358,6 +409,14 @@ async def tournament_rank(
         return labels.get(c.id, "?")
 
     random.shuffle(survivors)  # randomize bracket seeding only; identity labels already fixed above
+    await emit_graph_event(
+        event_config or {},
+        "tournament.started",
+        {
+            "candidate_ids": [candidate.id for candidate in survivors],
+            "ranking_group_size": group_size,
+        },
+    )
 
     print(f"\n[IDX {idx}] ================ Tournament Ranking ================\n")
 
@@ -369,10 +428,39 @@ async def tournament_rank(
     while len(survivors) > 1:
         rounds += 1
         groups = _tournament_groups(survivors, group_size)
+        round_id = f"round-{rounds}"
+        await emit_graph_event(
+            event_config or {},
+            "round.started",
+            {
+                "round_id": round_id,
+                "round_index": rounds,
+                "groups": [
+                    {
+                        "group_id": f"{round_id}-group-{index}",
+                        "candidate_ids": [candidate.id for candidate in group],
+                        "bye": len(group) == 1,
+                    }
+                    for index, group in enumerate(groups, 1)
+                ],
+                "survivor_ids": [candidate.id for candidate in survivors],
+            },
+        )
         print(f"[IDX {idx}] Round {rounds}")
         next_survivors: list[Candidate] = []
         for gi, group in enumerate(groups, start=1):
+            group_payload = {
+                "round_id": round_id,
+                "round_index": rounds,
+                "group_id": f"{round_id}-group-{gi}",
+                "candidate_ids": [candidate.id for candidate in group],
+            }
             if len(group) == 1:
+                await emit_graph_event(
+                    event_config or {},
+                    "candidate.bye",
+                    {**group_payload, "candidate_id": group[0].id},
+                )
                 # A trailing candidate advances unchanged without an inference call.
                 print(f"[IDX {idx}] Group {gi}: {lbl(group[0])} (bye)")
                 print(f"[IDX {idx}] Winner: {lbl(group[0])}\n")
@@ -387,12 +475,36 @@ async def tournament_rank(
                 for c in group:
                     print(f"[IDX {idx}] {lbl(c)}")
 
+            await emit_graph_event(event_config or {}, "group.started", group_payload)
+            group_started = time.perf_counter()
             winner, calls, parse_failed = await group_ranker(user_query, group, llm, idx)
+            completed_payload = {
+                **group_payload,
+                "winner_id": winner.id,
+                "eliminated_ids": [
+                    candidate.id for candidate in group if candidate.id != winner.id
+                ],
+                "selection_method": "fallback_first_candidate" if parse_failed else "llm_ranker",
+                "parse_failed": parse_failed,
+                "duration_ms": round((time.perf_counter() - group_started) * 1000, 3),
+            }
+            if parse_failed:
+                await emit_graph_event(event_config or {}, "ranking.fallback", completed_payload)
+            await emit_graph_event(event_config or {}, "group.completed", completed_payload)
             total_calls += calls
             parse_failed_any = parse_failed_any or parse_failed
             print(f"[IDX {idx}] Winner: {lbl(winner)}\n")
             next_survivors.append(winner)
         survivors = next_survivors
+        await emit_graph_event(
+            event_config or {},
+            "round.completed",
+            {
+                "round_id": round_id,
+                "round_index": rounds,
+                "survivor_ids": [candidate.id for candidate in survivors],
+            },
+        )
 
     global_winner = survivors[0]
 
@@ -470,11 +582,25 @@ async def tournament_select(state: AgentState, config: RunnableConfig) -> dict:
                 llm,
                 idx,
                 group_size=cfg.get("ranking_group_size", DEFAULT_RANKING_GROUP_SIZE),
+                event_config=config,
             )
         )
         rank_latency = time.perf_counter() - t0
 
     answer = winner.answer
+    await emit_graph_event(
+        config,
+        "tournament.completed",
+        {
+            "winner_id": winner.id,
+            "ranking_group_size": cfg.get("ranking_group_size", DEFAULT_RANKING_GROUP_SIZE),
+            "observed_max_group_size": tournament_max_group_size,
+            "rounds": tournament_rounds,
+            "rank_calls": rank_calls,
+            "parse_failed": rank_parse_failed,
+            "ranking_skipped": len(pool) == 1,
+        },
+    )
 
     print(f"[IDX {idx}] Winner: id={winner.id[:8]}")
     print(

@@ -9,6 +9,8 @@ from src.backend.api.v1.schemas import ChatSettings
 from src.backend.database.models import Attachment, Conversation, Message, Run, Submission
 from src.backend.execution.store import RunClaim, RunResult, RunStore
 from src.backend.execution.worker import ComputeStateUnknown
+from src.backend.execution.control import current_run_control
+from src.backend.execution.events import RunProgressRecorder
 from src.backend.memory.service import ConversationMemory
 from src.backend.memory.config import MemorySettings
 
@@ -109,7 +111,9 @@ class GenerateReply:
                 names = "\n".join(f"- {file.file_name}" for file in attachments)
                 content += "\n\nFiles uploaded with this message:\n" + names
             current_position = (current.created_at, current.id)
-        messages = await self.memory.prepare(claim, settings, content, current_position)
+        messages = await self.memory.summarize_old_history_and_build_messages_for_inference(
+            claim, settings, content, current_position
+        )
         return messages, settings
 
     async def __call__(self, claim: RunClaim) -> RunResult:
@@ -128,7 +132,10 @@ class GenerateReply:
             Exception: Invalid inputs, model responses or ordinary generation failures
                 propagate so the executor records failure without a fake assistant answer.
         """
+        progress_recorder = RunProgressRecorder(self.sessions, claim)
+        control_token = current_run_control.set(progress_recorder)
         try:
+            await progress_recorder.check_run_ownership_and_cancellation()
             messages, settings = await self._load_input(claim)
             response = await self.ai.chat(
                 messages=messages,
@@ -139,9 +146,12 @@ class GenerateReply:
                 tools_enabled=settings.tools_enabled,
                 conversation_id=claim.conversation_id,
                 ranking_group_size=settings.ranking_group_size,
+                progress_recorder=progress_recorder,
             )
         except InferenceStateUnknown as error:
             raise ComputeStateUnknown() from error
+        finally:
+            current_run_control.reset(control_token)
         answer = response["final_answer"]
         citation_ids = tuple(UUID(str(identity)) for identity in response.get("citations", []))
         return RunResult(

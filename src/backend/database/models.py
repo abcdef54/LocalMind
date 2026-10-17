@@ -335,6 +335,8 @@ class Run(Base):
     record which worker may save its result and until when; attempt distinguishes
     executions. At most one active run is allowed per conversation. An interrupted
     job may keep its owner/slot until model stoppage is confirmed separately.
+    event_sequence and visualization are committed with each RunEvent so snapshot
+    readers resume after a precise sequence, including across retry attempts.
     """
 
     __tablename__ = "runs"
@@ -384,6 +386,8 @@ class Run(Base):
     submission_id = Column(UUID(as_uuid=True), nullable=False)
     message_id = Column(UUID(as_uuid=True), nullable=False)
     result_message_id = Column(UUID(as_uuid=True), nullable=True)
+    event_sequence = Column(BigInteger, nullable=False, server_default=text("0"))
+    visualization = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     settings_snapshot = Column(JSONB, nullable=False)
     status = Column(String(24), nullable=False, server_default="pending")
     error = Column(JSONB(none_as_null=True), nullable=True)
@@ -399,4 +403,35 @@ class Run(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class RunEvent(Base):
+    """Store one ordered, replayable run update without candidate answers or tool contents.
+
+    run_id and sequence form the primary key. conversation_id must match the run.
+    attempt distinguishes retries, while sequence never resets. payload contains
+    bounded visualization metadata; created_at is the server timestamp.
+    """
+
+    __tablename__ = "run_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "conversation_id"],
+            ["runs.id", "runs.conversation_id"],
+            ondelete="CASCADE",
+            name="fk_run_events_conversation",
+        ),
+        CheckConstraint("sequence > 0", name="ck_run_events_sequence"),
+        CheckConstraint("attempt >= 0", name="ck_run_events_attempt"),
+        CheckConstraint("jsonb_typeof(payload) = 'object'", name="ck_run_events_payload"),
+    )
+    run_id = Column(UUID(as_uuid=True), primary_key=True)
+    sequence = Column(BigInteger, primary_key=True)
+    conversation_id = Column(UUID(as_uuid=True), nullable=False)
+    attempt = Column(Integer, nullable=False)
+    type = Column(String(64), nullable=False)
+    payload = Column(JSONB, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )

@@ -179,3 +179,11 @@ Adds summary timestamp/UUID coverage, version and paired-boundary constraints.
 Existing summary text is preserved but not trusted without coverage; memory rebuilds
 it from saved history. Counters are backfilled from live messages. Migration does
 not call inference; subsequent admitted runs perform any needed summarization.
+
+
+## 0009_run_events
+
+Adds Run.event_sequence/visualization and scoped RunEvent rows keyed by run/sequence.
+Old runs keep outcomes and leases with sequence zero; no fake historical events are
+backfilled. New progress and terminal updates commit with their event/projection.
+Downgrade removes replay state only, preserving messages, runs and files.

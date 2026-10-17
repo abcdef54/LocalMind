@@ -315,8 +315,8 @@ class ApiFoundationTests(unittest.TestCase):
         self.assertEqual(docs.status_code, 200)
         self.assertIn("/api/v1/openapi.json", docs.text)
 
-    def test_foundation_does_not_publish_unimplemented_feature_endpoints(self) -> None:
-        """Document implemented chat/submission routes while keeping future run endpoints absent."""
+    def test_foundation_publishes_implemented_feature_endpoints(self) -> None:
+        """Document implemented conversation, submission, run, SSE and lifecycle routes."""
         app = FastAPI()
         install_api_foundation(app)
         with TestClient(app) as client:
@@ -324,7 +324,13 @@ class ApiFoundationTests(unittest.TestCase):
             self.assertIn("/conversations", schema["paths"])
             self.assertIn("/conversations/{conversation_id}/messages", schema["paths"])
             self.assertIn("/conversations/{conversation_id}/submissions", schema["paths"])
-            self.assertFalse(any("/runs" in path for path in schema["paths"]))
+            for path in (
+                "/runs/{run_id}",
+                "/runs/{run_id}/events",
+                "/runs/{run_id}/cancel",
+                "/runs/{run_id}/retry",
+            ):
+                self.assertIn(path, schema["paths"])
             self.assertEqual(client.get("/openapi.json").json()["paths"], {})
 
 

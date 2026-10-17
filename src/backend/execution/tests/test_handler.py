@@ -14,6 +14,7 @@ from src.backend.execution.tests import test_executor as executor_tests
 from src.backend.execution.handler import GenerateReply
 from src.backend.execution.store import RunResult
 from src.backend.execution.worker import RunExecutor
+from src.backend.execution.control import RunCancellationRequested
 from src.backend.database.models import Attachment, Conversation, Message, Run, Submission
 from src.backend.ai.errors import InferenceStateUnknown
 from src.backend.ai.langgraph.graph_builder import LocalMindAI
@@ -34,7 +35,7 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
     async def claim_run(self):
         """Seed one ready send and reserve its execution slot for this test."""
         self.seed_run()
-        claim = await self.store.claim_next(
+        claim = await self.store.reserve_next_queued_run_for_worker(
             worker_id="handler-test", lease_seconds=60, max_concurrency=1
         )
         self.assertIsNotNone(claim)
@@ -180,8 +181,10 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
                 .where(Attachment.id == deleted)
                 .values(status="deleted", deleted_at=sa.func.now())
             )
-        self.assertTrue(await self.store.complete(claim, result))
-        self.assertFalse(await self.store.complete(claim, result))
+        self.assertTrue(await self.store.save_assistant_reply_and_mark_run_completed(claim, result))
+        self.assertFalse(
+            await self.store.save_assistant_reply_and_mark_run_completed(claim, result)
+        )
         from src.backend.database.models import message_attachments
 
         with self.engine.connect() as connection:
@@ -287,9 +290,13 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(
                 sa.update(Run).where(Run.id == claim.run_id).values(cancel_requested=True)
             )
-        self.assertFalse(await self.store.complete(claim, RunResult("late answer")))
+        self.assertFalse(
+            await self.store.save_assistant_reply_and_mark_run_completed(
+                claim, RunResult("late answer")
+            )
+        )
         ai = AsyncMock()
-        with self.assertRaises(ValueError):
+        with self.assertRaises(RunCancellationRequested):
             await GenerateReply(self.sessions, ai)(claim)
         ai.chat.assert_not_awaited()
 
@@ -349,7 +356,7 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 202, response.text)
             accepted = response.json()
             self.assertIsNone(
-                await self.store.claim_next(
+                await self.store.reserve_next_queued_run_for_worker(
                     worker_id="too-early", lease_seconds=10, max_concurrency=1
                 )
             )

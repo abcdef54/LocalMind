@@ -6,7 +6,7 @@ It does not depend on which history page the browser has loaded.
 ```text
 GenerateReply loads current input + saved settings
         ↓
-ConversationMemory.prepare() reads the saved summary boundary
+ConversationMemory.summarize_old_history_and_build_messages_for_inference() reads the saved summary boundary
         ↓
 Keep a recent raw suffix that fits the input budget (at most 20 messages)
         ↓
