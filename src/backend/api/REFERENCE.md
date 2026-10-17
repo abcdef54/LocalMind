@@ -79,9 +79,9 @@ count, including when group size exceeds that count. Registry availability and
 whether a model can serve a run require later service checks; schema validation
 alone does not load or verify a model.
 
-Group size is a declared v1 contract at this stage. The legacy LangGraph still
-uses its original fixed group size; BE-12 implements the configurable algorithm.
-This foundation does not advertise working configurable inference or streaming.
+BE-12 passes the saved group size to LangGraph. It limits each ranking match,
+independently of candidate count; default K=3 keeps the original bracket behavior.
+Live streaming is not implemented yet.
 The initial schema cap is 7; capability/configuration delivery belongs to BE-16.
 
 ## Error contract

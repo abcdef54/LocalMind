@@ -1,25 +1,29 @@
-# Candidate generation and ranking
+# Candidate generation and ranking (BE-12)
 
-This graph generates candidate replies and selects a winner. Candidate count and ranking group size are different settings.
+Reasoning mode sets candidate count N; saved ranking_group_size sets maximum match
+size K (strict integer 2–7, default 3). They are independent settings.
 
 ```text
-graph_builder.py → LocalMindAI.chat()
-Add system prompt and execution configuration
+GenerateReply → LocalMindAI.chat(ranking_group_size=K)
         ↓
-START → setup → generate
+setup → reasoning mode selects N: low=1, medium=3, high=5, extra=7
         ↓
-graph_configs.py determines candidate count from reasoning mode
+generate → N independent candidates, optional tool calls, stable candidate IDs
         ↓
-Generate candidates (optional tool-call loops per candidate)
+tournament_select → tournament_rank(group_size=K)
         ↓
-tournament_select
-   ├─ one candidate → use it directly
-   └─ multiple → tournament_rank()
-                 Shuffle bracket → group candidates → rank each group
-                 Single-candidate groups advance without a ranking call
-                 Repeat with winners until one remains
+Shuffle bracket once; split survivors into full groups of K
+Trailing candidates advance as singleton byes (no model call)
+If all survivors fit in one match, rank them together
         ↓
-END → final_answer + citations + compact tournament metrics
+Rank each non-singleton group → advance winners → repeat until one remains
+        ↓
+Answer + citations + metadata (configured K and largest actual match)
+
+N=5, K=2 → 4 ranking calls
+N=5, K=3 → 2 ranking calls (unchanged default)
+N=5, K=5 or 7 → 1 ranking call
 ```
 
-Group size is currently fixed at 3; configurable groups and visualization events are planned.
+Group size does not regenerate candidates, change prompts or add visualization calls.
+Live tournament events/animation remain BE-13/14.

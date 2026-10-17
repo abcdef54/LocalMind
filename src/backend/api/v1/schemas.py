@@ -6,8 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, field_validator
 
-DEFAULT_RANKING_GROUP_SIZE = 3
-MAX_RANKING_GROUP_SIZE = 7
+from src.backend.constants import DEFAULT_RANKING_GROUP_SIZE, MAX_RANKING_GROUP_SIZE
 
 ModelName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ReasoningMode = Literal["low", "medium", "high", "extra"]
@@ -20,7 +19,7 @@ class ChatSettings(BaseModel):
     Require a model name; check supported personality/reasoning values, temperature
     0..2, boolean tools_enabled and ranking_group_size 2..7 (default 3). Group size
     limits candidates compared together, not how many candidates reasoning generates.
-    This schema does not verify model installation or change the legacy AI endpoint.
+    The saved group size is passed to LangGraph; model installation is outside this schema.
     """
 
     model_config = ConfigDict(extra="forbid")

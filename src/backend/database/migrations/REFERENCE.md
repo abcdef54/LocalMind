@@ -171,3 +171,11 @@ Adds nullable JSONB generation_metadata to messages and expands model_name from
 50 to 255 characters to match ChatSettings. Existing answers remain unchanged.
 Downgrade removes metrics and rejects shrinking model names longer than 50 rather
 than silently truncating them. No inference, file or vector operations run here.
+
+
+## 0008_conversation_memory
+
+Adds summary timestamp/UUID coverage, version and paired-boundary constraints.
+Existing summary text is preserved but not trusted without coverage; memory rebuilds
+it from saved history. Counters are backfilled from live messages. Migration does
+not call inference; subsequent admitted runs perform any needed summarization.

@@ -132,6 +132,7 @@ tests/
 !src/backend/api/tests/
 !src/backend/execution/tests/
 !src/backend/indexing/tests/
+!src/backend/memory/tests/
 
 *.gguf
 

@@ -74,7 +74,9 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
             "reasoning_mode": "high",
             "temperature": 0.4,
             "tools_enabled": True,
+            "ranking_group_size": 5,
         }
+        covered_id = uuid4()
         with self.engine.begin() as connection:
             connection.execute(
                 sa.update(Run).where(Run.id == claim.run_id).values(settings_snapshot=settings)
@@ -82,7 +84,12 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(
                 sa.update(Conversation)
                 .where(Conversation.id == claim.conversation_id)
-                .values(summary="Known facts")
+                .values(
+                    summary="Known facts",
+                    summary_through_created_at=now - timedelta(minutes=21),
+                    summary_through_message_id=covered_id,
+                    summary_version=1,
+                )
             )
             connection.execute(
                 sa.update(Message)
@@ -92,6 +99,7 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
             for number in range(25):
                 connection.execute(
                     sa.insert(Message).values(
+                        id=covered_id if number == 4 else uuid4(),
                         conversation_id=claim.conversation_id,
                         role="user" if number % 2 == 0 else "assistant",
                         content=f"history-{number}",
@@ -121,6 +129,7 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
         )
         kwargs = ai.chat.call_args.kwargs
         self.assertEqual(kwargs["model_name"], "saved-model")
+        self.assertEqual(kwargs["ranking_group_size"], 5)
         self.assertEqual(kwargs["conversation_id"], claim.conversation_id)
         messages = kwargs["messages"]
         self.assertEqual(len(messages), 22)
@@ -408,3 +417,11 @@ class GenerateReplyTests(unittest.IsolatedAsyncioTestCase):
                     accepted["documents"][0]["id"],
                 )
                 self.assertEqual(answer.generation_metadata["candidate_count"], 1)
+                self.assertEqual(
+                    connection.scalar(
+                        sa.select(Conversation.message_count).where(
+                            Conversation.id == conversation_id
+                        )
+                    ),
+                    2,
+                )

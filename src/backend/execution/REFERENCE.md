@@ -42,7 +42,7 @@ The handler must **not** independently publish messages or other unguarded
 durable results. Publication after lease loss returns false instead of creating
 a second answer. Completion saves model/personality/reasoning/temperature settings,
 validated citations and compact generation metadata in the same transaction.
-Summary watermark/token-budget improvements remain BE-11.
+BE-11 prepares bounded context and incremental summaries using the same run slot.
 
 An ordinary handler exception records a generic `HANDLER_FAILED`, clears its
 lease and does not retry inference automatically. Ordinary return/exception means
@@ -148,11 +148,12 @@ shutdown drain/timeout, cancellation-resistant handlers and FastAPI lifecycle.
 Start in handler.py: `_load_input()` reads the owned running run, validates its
 stored ChatSettings, checks the live chat/ready submission and original user message,
 and verifies all submitted files remain ready with an index generation. A
-short DB read ends before inference starts. The newest 20 prior messages are
-selected by (created_at, id), then reversed to chronological order. Current input
-is appended once, with uploaded filenames for file-only sends. Future messages,
-other chats and deleted messages are excluded. Existing summary text is prepended;
-this step does not regenerate summaries or implement a token-budget memory policy.
+short DB read ends before inference starts. ConversationMemory then updates older
+history summaries using saved timestamp/UUID coverage and a version check. Raw
+history is a chronological suffix after that boundary (at most 20 messages),
+shrunk further to fit the configured budget; current input is appended once.
+Legacy summaries without a coverage boundary are rebuilt, not blindly reused.
+See [memory flow and configuration](../memory/README.md).
 
 `__call__()` passes the saved settings and server-bound conversation UUID to
 LocalMindAI.chat(). RunResult contains nonblank text, deduplicated citation UUIDs
@@ -177,8 +178,8 @@ no application retry regenerates a failed/interrupted answer automatically.
 
 No run/SSE/cancel endpoints are added here. Use the existing submission lookup for
 saved IDs and paginated message history for completed answers; live run/event APIs
-arrive in later tasks. ranking_group_size remains a saved contract until BE-12;
-the current tournament algorithm still groups at most three candidates per match.
+arrive in later tasks. BE-12 passes saved ranking_group_size into the graph;
+the default is three, with strict validation from two through seven.
 
 ## Example queued task record
 

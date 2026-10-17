@@ -3,12 +3,12 @@
 The AI package builds replies; document acceptance/indexing is managed by separate backend modules.
 
 ```text
-execution/handler.py loads saved context and settings
+execution/handler.py → memory/ prepares budgeted history + summary + saved settings
         ↓
 langgraph/graph_builder.py → LocalMindAI.chat()
 Add personality instruction + bind conversation UUID
         ↓
-LangGraph: setup → generate candidates → tournament_select
+LangGraph: setup → generate N candidates → tournament_select with saved K
         ↓                       ↕ optional tool calls
         │                langchain/tools.py
         │                Document retrieval / web tools

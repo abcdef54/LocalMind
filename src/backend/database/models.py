@@ -37,12 +37,21 @@ class Conversation(Base):
     """Store one chat's title, timestamps and saved conversation summary.
 
     messages and attachments link its history/documents. deleted_at hides the chat
-    without immediately deleting rows or disk files. Counters support later summary
-    updates; this model does not maintain them automatically on every new message.
+    without immediately deleting rows or disk files. summary_through_created_at and
+    summary_through_message_id mark the last whole message covered by summary.
+    summary_version rejects concurrent stale updates. Send/answer transactions update
+    message counters; summary commits recompute how many live messages remain uncovered.
     """
 
     __tablename__ = "conversations"
-    __table_args__ = (Index("ix_conversations_created_id", "created_at", "id"),)
+    __table_args__ = (
+        Index("ix_conversations_created_id", "created_at", "id"),
+        CheckConstraint(
+            "(summary_through_created_at IS NULL) = (summary_through_message_id IS NULL)",
+            name="ck_conversations_summary_boundary",
+        ),
+        CheckConstraint("summary_version >= 0", name="ck_conversations_summary_version"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, nullable=False, default=uuid.uuid4)
     title = Column(String(255), nullable=False)
@@ -50,6 +59,9 @@ class Conversation(Base):
     deleted_at = Column(DateTime, nullable=True)
 
     summary = Column(Text, nullable=True)
+    summary_through_created_at = Column(DateTime, nullable=True)
+    summary_through_message_id = Column(UUID(as_uuid=True), nullable=True)
+    summary_version = Column(Integer, nullable=False, server_default=text("0"))
     message_count = Column(Integer, nullable=False, default=0)
     unsummarized_message_count = Column(Integer, nullable=False, default=0)
 

@@ -20,12 +20,14 @@ def _build_llm(model_name: str, base_url: str, temperature: float) -> ChatOpenAI
     via `_seeded` — only meaningful at temperature > 0 (at temp 0 decoding is greedy/deterministic
     and the seed has no effect).
     """
+    from src.backend.memory.config import MemorySettings
+
     return ChatOpenAI(
         base_url=base_url,
         api_key="not-needed",
         model=model_name,
         temperature=temperature,
-        max_tokens=2048,
+        max_tokens=MemorySettings.from_environment().reply_tokens,
         max_retries=0,
         timeout=120,
     )
@@ -140,6 +142,7 @@ async def invoke_model(model, messages):
         Model response after the request completes normally.
 
     Raises:
+        ValueError: Message/tool input plus reserved output exceeds context capacity.
         InferenceStateUnknown: Connection loss, timeout or server failure leaves
             remote computation unconfirmed. No automatic model retry is attempted.
         Exception: Other model errors propagate; no error text becomes an answer.
@@ -148,6 +151,24 @@ async def invoke_model(model, messages):
     from openai import APIConnectionError, APIStatusError
     from src.backend.ai.errors import InferenceStateUnknown
 
+    import json
+    from src.backend.memory.budget import estimate_messages_tokens, estimate_text_tokens
+    from src.backend.memory.config import MemorySettings
+
+    settings = MemorySettings.from_environment()
+    request_size = estimate_messages_tokens(messages)
+    options = getattr(model, "kwargs", {})
+    tools = options.get("tools") if isinstance(options, dict) else None
+    if isinstance(tools, list):
+        request_size += estimate_text_tokens(json.dumps(tools, ensure_ascii=False))
+    output_limit = options.get("max_tokens") if isinstance(options, dict) else None
+    if type(output_limit) is not int:
+        output_limit = getattr(model, "max_tokens", 0)
+    if type(output_limit) is not int:
+        output_limit = 0
+    reserved_output = max(settings.reply_tokens, output_limit)
+    if request_size > settings.context_tokens - reserved_output:
+        raise ValueError("Model request exceeds the configured context budget")
     try:
         return await model.ainvoke(messages)
     except (APIConnectionError, httpx.TransportError, TimeoutError) as error:

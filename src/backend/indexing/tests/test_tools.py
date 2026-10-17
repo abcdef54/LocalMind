@@ -98,9 +98,6 @@ class ScopedToolTests(unittest.IsolatedAsyncioTestCase):
         await ai.chat([], "fake", "general", "low", 0.0, conversation_id=conversation_id)
         _, config = ai._graph.ainvoke.call_args.args
         self.assertEqual(config["configurable"]["conversation_id"], str(conversation_id))
-        await ai.baseline_chat([], "fake")
-        _, config = ai._graph.ainvoke.call_args.args
-        self.assertFalse(config["configurable"]["tools_enabled"])
 
     async def test_old_upload_and_unsafe_delete_routes_are_removed(self):
         """Keep the old upload-on-drop path absent instead of retaining a parallel indexer."""

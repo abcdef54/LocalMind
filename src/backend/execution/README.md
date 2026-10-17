@@ -80,7 +80,7 @@ After reserving one, it changes these fields:
 ```
 
 It then passes the run's IDs and reservation details to `GenerateReply`, which
-loads the linked message and saved settings. Calling `self.handler(claim)` in
+loads the linked message and saved settings, then prepares [bounded conversation memory](../memory/README.md). Calling `self.handler(claim)` in
 `worker.py` invokes `GenerateReply.__call__()` because the registered handler is a
 `GenerateReply` instance. The handler calls `LocalMindAI.chat()` to run LangGraph;
 actual LLM inference runs in the separate llama-swap server. A heartbeat renews
@@ -114,7 +114,7 @@ Reserve slot: run running + owner token + lease expiry + attempt
 create_task(_execute(claim)) → await self.handler(claim)
 self.handler is GenerateReply; calling it invokes GenerateReply.__call__()
         ↓
-_load_input(): saved settings + summary + latest 20 prior messages + input once
+_load_input() → ConversationMemory: update summary + budgeted recent history + input once
         ↓
 LocalMindAI.chat() → LangGraph → invoke_model() → model.ainvoke()
 HTTP request to llama-swap → candidates + optional RAG → tournament winner

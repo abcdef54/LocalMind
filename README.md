@@ -132,6 +132,8 @@ available at `/api/v1/openapi.json`; feature endpoints are added incrementally.
 The [durable run executor](src/backend/execution/README.md) documents PostgreSQL
 claims, leases, recovery and shutdown. BE-10 registers the real LangGraph handler,
 which generates replies for ready submissions and saves citations/metadata atomically.
+The [memory module](src/backend/memory/README.md) maintains incremental summaries
+and budgeted context. Ranking match size is configurable independently of candidate count.
 
 The [submission upload guide](src/backend/uploads/README.md) describes multipart sends,
 filename duplicate checks, upload limits, storage cleanup and integration boundaries.

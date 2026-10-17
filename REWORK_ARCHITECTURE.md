@@ -885,6 +885,23 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - 150 tests pass với PostgreSQL 18 tạm, Chroma thật và model/embeddings giả, bao gồm multipart → indexing → scoped RAG → graph → persisted answer và high mode 5 candidates/2 rank calls. Không migrate DB app, tải model hoặc gọi GPU.
 - Group size tùy chỉnh và event/SSE/cancel HTTP API vẫn thuộc BE-12 đến BE-15. Thuật toán tournament, candidate counts và bracket rules không đổi trong task này.
 
+### BE-11 — Conversation memory và summary: hoàn thành (2026-10-17)
+
+- Thêm module `memory/`; handler chuẩn bị summary + raw history theo budget trong execution slot hiện tại, không tạo queue/worker mới và không phụ thuộc pagination browser.
+- Migration `0008_conversation_memory` lưu `(summary_through_created_at, summary_through_message_id)` và version. Mỗi batch summary thành công mới commit text/mốc cùng nhau; stale lease/cancel/version không được ghi đè.
+- Chỉ đọc message sau mốc và trước input hiện tại, keyset theo timestamp + UUID. Giữ raw suffix tối đa 20 message còn vừa budget; phần cũ hơn được summary qua các batch bounded. Không tóm tắt lặp batch đã commit hoặc đưa raw message đã có trong summary vào context.
+- Summary legacy không biết mốc được giữ trong DB nhưng không dùng làm context; rebuild từ lịch sử thật. Counter được backfill qua migration và cập nhật cùng transaction insert user/assistant; summary commit đếm lại phần chưa bao phủ.
+- Token budget là ước lượng bảo thủ theo UTF-8 bytes + framing, không phải tokenizer chính xác của model. Reserve cho reply/tools/summary/system prompt; kiểm tra lại tool-expanded prompts trước inference. Input hiện tại quá lớn báo lỗi, không âm thầm cắt.
+- Message cũ quá lớn được chia Unicode-safe để summary hết; chỉ advance mốc sau khi xử lý đủ message. Model/summary lỗi không lưu câu trả lời giả; compute chưa rõ đã dừng vẫn giữ slot.
+
+### BE-12 — Configurable ranking group size: hoàn thành (2026-10-17)
+
+- Nối `ranking_group_size` từ settings snapshot → GenerateReply → LocalMindAI → graph config → tournament. Strict integer 2–7, mặc định 3; validation cả HTTP và Python entry points.
+- N sinh ứng viên vẫn do reasoning mode quyết định (1/3/5/7); K chỉ giới hạn số ứng viên trong mỗi trận. Chia full groups K và singleton byes; khi survivors <= K thì rank cùng một trận, lặp tới một winner.
+- Giữ stable IDs, bracket shuffle, generation/ranking prompts và default K=3. Metadata lưu K đã chọn cùng largest actual group. N=5 với K=2/3/5/7 dùng 4/2/1/1 ranking calls.
+- Verification cuối: 169 tests pass với PostgreSQL 18 tạm, Chroma thật và model/embeddings giả; gồm migration/counters, summary retry/coverage/budget, K=2..7 và regression toàn bộ backend. Không migrate DB app hoặc gọi GPU.
+- Không thêm model call cho visualization; event instrumentation/SSE vẫn thuộc BE-13/14. Hướng dẫn flow: `memory/README.md` và `ai/langgraph/README.md`.
+
 ## 18. Implementation Tasks
 
 | Task | Phạm vi thực hiện | Tiêu chí hoàn thành |

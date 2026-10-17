@@ -279,6 +279,8 @@ class RunStore:
             if still_owned is None:
                 await session.rollback()
                 return False
+            conversation.message_count += 1
+            conversation.unsummarized_message_count += 1
             run.result_message_id = message.id
             run.status = "completed"
             run.finished_at = func.clock_timestamp()

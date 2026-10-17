@@ -9,6 +9,7 @@ from src.backend.database.session import upgrade_database_schema, async_session_
 from src.backend.execution.config import ExecutorSettings
 from src.backend.execution.store import RunStore
 from src.backend.execution.handler import GenerateReply
+from src.backend.memory.config import MemorySettings
 from src.backend.execution.worker import RunExecutor
 from src.backend.indexing.config import IndexingSettings
 from src.backend.indexing.resources import get_document_vector_index
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
     executor_settings = ExecutorSettings.from_environment()
     upload_settings = UploadSettings.from_environment()
     indexing_settings = IndexingSettings.from_environment()
+    memory_settings = MemorySettings.from_environment()
     print()
     print("=" * 60)
     print()
@@ -114,7 +116,7 @@ async def lifespan(app: FastAPI):
 
     executor = RunExecutor(
         RunStore(async_session_maker),
-        handler=GenerateReply(async_session_maker, ai),
+        handler=GenerateReply(async_session_maker, ai, memory_settings),
         settings=executor_settings,
     )
     app.state.run_executor = executor

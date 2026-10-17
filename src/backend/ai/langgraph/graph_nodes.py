@@ -8,7 +8,11 @@ from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, AIMessage
 from langchain_core.messages import ToolMessage
 from src.backend.ai.langgraph.graph_states import AgentState, Candidate
-from src.backend.ai.langgraph.graph_configs import get_config, MAX_RANK_GROUP
+from src.backend.ai.langgraph.graph_configs import (
+    get_config,
+    DEFAULT_RANKING_GROUP_SIZE,
+    validate_ranking_group_size,
+)
 from src.backend.ai.langgraph.graph_utils import (
     get_llm,
     _seeded,
@@ -24,6 +28,7 @@ def setup(state: AgentState, config: RunnableConfig) -> dict:
     """Pure-Python entry (NO llm call). Reads mode + governor settings, seeds the run state.
     RETURNS: user_query, reasoning_mode, width, pool."""
     cfg = config["configurable"]
+    validate_ranking_group_size(cfg.get("ranking_group_size", DEFAULT_RANKING_GROUP_SIZE))
     mode = cfg["reasoning_mode"]
     loop_cfg = get_config(mode)
 
@@ -282,30 +287,33 @@ async def rank_no_reasoning(
     return label_to_cand[label], 1, parse_failed
 
 
-# ───────────────────────── Tournament selector (hierarchical bracket ranking) ─────────────────────────
-# Pure ORCHESTRATION over the one-shot plain-text ranker (rank_no_reasoning): NO new prompt, NO
-# regeneration, NO verifier/critic, NO abstention, NO extra generation round — the generator above is
-# untouched and ONLY the selector changes. Rather than one N-way ranking call, run a balanced tournament
-# where every ranking call compares at most MAX_RANK_GROUP (=3) candidates.
+# Compare the already-generated answers in bounded matches. Group size changes
+# only selection; it does not regenerate answers or introduce a new ranking prompt.
 
 
-def _tournament_groups(candidates: list["Candidate"]) -> list[list[Candidate]]:
-    """One round's bracket split — the MINIMUM-rank-call rule. Rank floor(n/3) full
-    groups of MAX_RANK_GROUP (=3); the trailing n%3 candidates each take a BYE (a size-1 group, no
-    ranking call) rather than being ranked as a sub-3 group. A group of 3 removes 2 candidates per
-    call, so this hits the theoretical minimum ceil((n-1)/2) calls for every n. Byeing the remainder
-    (instead of ranking it) is what lets the survivor count drop straight to <=3 and finish in one
-    final call — e.g. N=5: rank one [3], bye the other two -> 3 survivors -> 1 final call = 2 calls
-    (NOT [3,2] -> 3 calls). Structures: 3 -> [3] (1 call); 5 -> [3] + 2 byes (2 calls); 7 -> [3,3]
-    + 1 bye (3 calls); 9 -> [3,3,3] (4 calls); all reach exactly 3 survivors after round 1, then a
-    single 3-way final. The list is already shuffled by `tournament_rank`, so which candidates fill
-    the ranked groups vs. take byes is random; the A/B/C… labels are display-only (input order)."""
-    n = len(candidates)
-    if n <= MAX_RANK_GROUP:
-        return [list(candidates)]  # final group, ranked in one call
-    full = (n // MAX_RANK_GROUP) * MAX_RANK_GROUP  # candidates that fill complete size-3 groups
-    groups = [list(candidates[i : i + MAX_RANK_GROUP]) for i in range(0, full, MAX_RANK_GROUP)]
-    groups.extend([candidates[j]] for j in range(full, n))  # trailing remainder -> singleton byes
+def _tournament_groups(
+    candidates: list[Candidate], group_size: int = DEFAULT_RANKING_GROUP_SIZE
+) -> list[list[Candidate]]:
+    """Split one round into full groups; trailing candidates advance without a match.
+
+    Args:
+        candidates: Survivors in their already-shuffled bracket order.
+        group_size: Maximum candidates per match, strict integer 2..7, default 3.
+
+    Returns:
+        Full groups plus singleton byes. If all survivors fit in one group, rank
+        them together. Every candidate appears once; order and stable IDs are kept.
+        Default K=3 preserves the previous grouping exactly (5 → [3,1,1]).
+    """
+    validate_ranking_group_size(group_size)
+    count = len(candidates)
+    if not candidates:
+        return []
+    if count <= group_size:
+        return [list(candidates)]
+    full = (count // group_size) * group_size
+    groups = [list(candidates[start : start + group_size]) for start in range(0, full, group_size)]
+    groups.extend([candidate] for candidate in candidates[full:])
     return groups
 
 
@@ -314,12 +322,13 @@ async def tournament_rank(
     candidates: list[Candidate],
     llm,
     idx: str = "?",
+    group_size: int = DEFAULT_RANKING_GROUP_SIZE,
 ) -> tuple[Candidate, int, bool, int, int]:
     """Hierarchical tournament selector — an ORCHESTRATION layer over the existing one-shot ranker;
-    it does NOT introduce a new ranking prompt. Each ranking call sees at most MAX_RANK_GROUP
+    it does NOT introduce a new ranking prompt. Each ranking call sees at most group_size (K, default 3)
     candidates, decomposing the N-way comparison that degrades at larger N.
-    Algorithm: shuffle once -> `_tournament_groups` ranks floor(n/3) groups of 3 and byes the
-    trailing n%3 (minimum rank calls) -> rank each group with the one-shot plain-text ranker ->
+    Algorithm: shuffle once -> `_tournament_groups` forms floor(n/K) full groups of K and byes the
+    trailing n%K candidates when n > K; when n <= K, rank the survivors together -> rank each group with the one-shot plain-text ranker ->
     advance winners (a byed singleton carries over with no call) -> recurse until one candidate remains.
 
     RETURNS: (global_winner, total_rank_calls, parse_failed, tournament_rounds,
@@ -329,6 +338,9 @@ async def tournament_rank(
       - tournament_max_group_size: the largest group actually submitted to a ranking call (0 if none).
     Independent of majority voting; needs no answer-equality key, so it carries over to non-numeric
     tasks exactly like the one-shot ranker it wraps."""
+    validate_ranking_group_size(group_size)
+    if not candidates:
+        raise ValueError("Tournament requires at least one candidate")
     group_ranker = rank_no_reasoning
 
     survivors = list(candidates)
@@ -356,14 +368,12 @@ async def tournament_rank(
 
     while len(survivors) > 1:
         rounds += 1
-        groups = _tournament_groups(survivors)
+        groups = _tournament_groups(survivors, group_size)
         print(f"[IDX {idx}] Round {rounds}")
         next_survivors: list[Candidate] = []
         for gi, group in enumerate(groups, start=1):
             if len(group) == 1:
-                # Bye: a lone candidate advances with no ranking call. Under 3B's min-call grouping
-                # this is the EXPECTED handling of the trailing n%3 (e.g. N=5 byes 2 -> 3 survivors;
-                # N=7 byes 1 -> 3 survivors; N=9 byes none), which is what keeps the call count minimal.
+                # A trailing candidate advances unchanged without an inference call.
                 print(f"[IDX {idx}] Group {gi}: {lbl(group[0])} (bye)")
                 print(f"[IDX {idx}] Winner: {lbl(group[0])}\n")
                 next_survivors.append(group[0])
@@ -373,7 +383,7 @@ async def tournament_rank(
             print(f"[IDX {idx}] Group {gi}:")
             if len(group) == 2:
                 print(f"[IDX {idx}] {lbl(group[0])} vs {lbl(group[1])}")
-            else:  # 3-way (MAX_RANK_GROUP); list vertically
+            else:  # Larger matches list candidate labels vertically.
                 for c in group:
                     print(f"[IDX {idx}] {lbl(c)}")
 
@@ -404,6 +414,8 @@ async def tournament_select(state: AgentState, config: RunnableConfig) -> dict:
     and adds tournament_rounds / tournament_rank_calls / tournament_max_group_size. `rank_calls`
     equals `tournament_rank_calls` (both count the tournament's ranking LLM calls), so the existing
     eval aggregation keeps working unchanged.
+    Each ranking call compares at most the saved ranking_group_size (default 3);
+    this changes match size, not the number of candidates generated.
     RETURNS: final_answer, messages, the selector-log fields, and the three tournament metrics."""
     cfg = config["configurable"]
     pool = state.get("pool", [])
@@ -452,7 +464,13 @@ async def tournament_select(state: AgentState, config: RunnableConfig) -> dict:
         llm = get_llm(cfg_copy)
         t0 = time.perf_counter()
         winner, rank_calls, rank_parse_failed, tournament_rounds, tournament_max_group_size = (
-            await tournament_rank(user_query, pool, llm, idx)
+            await tournament_rank(
+                user_query,
+                pool,
+                llm,
+                idx,
+                group_size=cfg.get("ranking_group_size", DEFAULT_RANKING_GROUP_SIZE),
+            )
         )
         rank_latency = time.perf_counter() - t0
 

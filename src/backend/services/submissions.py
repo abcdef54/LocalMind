@@ -9,12 +9,19 @@ import hashlib
 import json
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.backend.api.errors import ApiError
 from src.backend.api.v1.schemas import DocumentResponse, SubmissionInput, SubmissionResponse
-from src.backend.database.models import ACTIVE_RUN_STATUSES, Attachment, Message, Run, Submission
+from src.backend.database.models import (
+    ACTIVE_RUN_STATUSES,
+    Attachment,
+    Conversation,
+    Message,
+    Run,
+    Submission,
+)
 from src.backend.services.conversation_history import get_conversation
 from src.backend.uploads.storage import SubmissionFileBatch, run_file_operation
 
@@ -214,6 +221,14 @@ async def _create_submission_records(
     )
     session.add(user_message)
     await session.flush()
+    await session.execute(
+        update(Conversation)
+        .where(Conversation.id == conversation_id)
+        .values(
+            message_count=Conversation.message_count + 1,
+            unsummarized_message_count=Conversation.unsummarized_message_count + 1,
+        )
+    )
     session.add(
         Run(
             id=uuid4(),

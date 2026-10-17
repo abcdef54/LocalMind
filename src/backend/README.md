@@ -13,9 +13,9 @@ POST /api/v1/conversations/{id}/submissions → accept send → HTTP 202
         ↓
 Files pending → indexing → all ready (text-only sends skip indexing)
         ↓
-Run queued → execution/handler.py → saved context + settings
+Run queued → execution/handler.py → memory/ → summary + budgeted context + settings
         ↓
-LangGraph → candidates → optional RAG → tournament winner
+LangGraph → N candidates → optional RAG → tournament with saved group size K
         ↓
 Guarded transaction → save assistant + citations + metadata → run completed
         ↓
