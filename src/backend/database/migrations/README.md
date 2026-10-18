@@ -9,7 +9,7 @@ migration.py passes the existing connection to Alembic
         ↓
 env.py selects migration metadata/connection
         ↓
-versions/: 0001 → 0002 → 0003 → 0004 → 0005 → 0006 → 0007 → 0008 → 0009
+versions/: 0001 → 0002 → 0003 → 0004 → 0005 → 0006 → 0007 → 0008 → 0009 → 0010
         ↓
 Database schema and revision marker updated
         ↓

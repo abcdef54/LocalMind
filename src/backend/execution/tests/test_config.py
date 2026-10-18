@@ -65,17 +65,15 @@ class ExecutorLifespanTests(unittest.IsolatedAsyncioTestCase):
         fake_session_context = MagicMock()
         fake_session_context.__aenter__ = AsyncMock(return_value=object())
         fake_session_context.__aexit__ = AsyncMock(return_value=False)
-        fake_model_service = MagicMock()
-        fake_model_service.sync_local_models = AsyncMock()
+        fake_model_worker = MagicMock()
+        fake_model_worker.start = AsyncMock()
+        fake_model_worker.stop = AsyncMock()
         test_app = FastAPI()
         with (
             patch.object(application, "upgrade_database_schema", AsyncMock()),
             patch.object(application, "remove_orphaned_upload_batches", AsyncMock()),
-            patch.object(application.os, "makedirs"),
-            patch.object(application.os, "listdir", return_value=["test.gguf"]),
             patch.object(application, "async_session_maker", return_value=fake_session_context),
-            patch.object(application, "ModelService", return_value=fake_model_service),
-            patch.object(application, "get_model_manager"),
+            patch.object(application, "ModelDownloadWorker", return_value=fake_model_worker),
             patch.object(application, "get_document_vector_index"),
             patch.object(application, "get_ai"),
             patch.object(application, "RunExecutor", return_value=fake_executor),
@@ -96,3 +94,5 @@ class ExecutorLifespanTests(unittest.IsolatedAsyncioTestCase):
         fake_indexer.stop.assert_awaited_once()
         fake_cleanup.start.assert_awaited_once()
         fake_cleanup.stop.assert_awaited_once()
+        fake_model_worker.start.assert_awaited_once()
+        fake_model_worker.stop.assert_awaited_once()

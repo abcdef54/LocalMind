@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.backend.model_management.store import lock_model_registry_and_check_selected_model
+
 from src.backend.api.errors import ApiError
 from src.backend.execution.events import update_state_and_add_run_event
 from src.backend.api.v1.schemas import DocumentResponse, SubmissionInput, SubmissionResponse
@@ -309,6 +311,9 @@ async def accept_submission(
                         "This submission key was used with a different payload",
                     )
                 return await build_submission_response(session, existing_submission)
+            await lock_model_registry_and_check_selected_model(
+                session, submission_payload.settings.model_name
+            )
             file_names = [received_file.file_name for received_file in file_batch.received_files]
             await _check_new_submission_allowed(session, conversation_id, file_names)
             submission = await _create_submission_records(

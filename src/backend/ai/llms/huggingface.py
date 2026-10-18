@@ -1,10 +1,7 @@
-import os
-import re
-from huggingface_hub import HfApi, snapshot_download
-from pathlib import Path
-from src.backend.constants import DEFAULT_MODEL_REPO_ID, DEFAULT_MODEL_GGUF_FILE
+"""Search Hugging Face GGUF metadata; downloads are owned by model_management."""
 
-path = os.path.join(Path(os.path.abspath(__file__)).parent, 'cpp_models')
+import re
+from huggingface_hub import HfApi
 
 api = HfApi()
 
@@ -47,11 +44,7 @@ def format_downloads(n: int | None) -> str:
 def extract_license(tags: list[str]) -> str | None:
     for tag in tags:
         if tag.startswith("license:"):
-            return (
-                tag.removeprefix("license:")
-                .replace("-", " ")
-                .title()
-            )
+            return tag.removeprefix("license:").replace("-", " ").title()
     return None
 
 
@@ -100,17 +93,13 @@ def model_to_dict(model):
         "downloads_text": format_downloads(model.downloads),
         "likes": model.likes or 0,
         "license": extract_license(model.tags or []),
-        "created_at": (
-            model.created_at.date().isoformat()
-            if model.created_at
-            else None
-        ),
+        "created_at": (model.created_at.date().isoformat() if model.created_at else None),
     }
 
 
 def is_secondary_split_part(filename: str) -> bool:
     """Check if the filename represents a secondary part of a split GGUF model."""
-    m = re.search(r'[-.](?:gguf[-.])?(\d+)-of-(\d+)(?:\.gguf)?$', filename, re.IGNORECASE)
+    m = re.search(r"[-.](?:gguf[-.])?(\d+)-of-(\d+)(?:\.gguf)?$", filename, re.IGNORECASE)
     if m:
         part_num = int(m.group(1))
         if part_num > 1:
@@ -143,25 +132,27 @@ def list_quants(repo_id: str):
 
     for file in info.siblings:
         filename = file.rfilename
-        is_gguf = filename.endswith(".gguf") or re.search(r'\.gguf[-.]\d+-of-\d+$', filename, re.IGNORECASE)
+        is_gguf = filename.endswith(".gguf") or re.search(
+            r"\.gguf[-.]\d+-of-\d+$", filename, re.IGNORECASE
+        )
         if not is_gguf:
             continue
 
         # Detect if it is a split part
-        m = re.search(r'^(.*)[-.](?:gguf[-.])?(\d+)-of-(\d+)(?:\.gguf)?$', filename, re.IGNORECASE)
+        m = re.search(r"^(.*)[-.](?:gguf[-.])?(\d+)-of-(\d+)(?:\.gguf)?$", filename, re.IGNORECASE)
         if m:
             prefix = m.group(1)
             part_str = m.group(2)
             total_parts = m.group(3)
             first_part_str = "1".zfill(len(part_str))
-            
+
             # Reconstruct base key using correct separator and extension location
             if ".gguf" in filename.lower():
                 if "gguf-" in filename.lower() or "gguf." in filename.lower():
                     sep = "-" if "gguf-" in filename.lower() else "."
                     base_key = f"{prefix}.gguf{sep}{first_part_str}-of-{total_parts}"
                 else:
-                    sep = filename[m.start(2)-1]
+                    sep = filename[m.start(2) - 1]
                     base_key = f"{prefix}{sep}{first_part_str}-of-{total_parts}.gguf"
             else:
                 base_key = f"{prefix}-{first_part_str}-of-{total_parts}"
@@ -229,33 +220,3 @@ def extract_quant(filename: str):
             return p
 
     return "Unknown"
-
-
-def download_gguf(
-    repo_id: str = DEFAULT_MODEL_REPO_ID,
-    gguf_filename: str = DEFAULT_MODEL_GGUF_FILE
-) -> str:
-    # Build allow patterns
-    m = re.search(r'^(.*)[-.](?:gguf[-.])?(\d+)-of-(\d+)(?:\.gguf)?$', gguf_filename, re.IGNORECASE)
-    if m:
-        prefix = m.group(1)
-        total_parts = m.group(3)
-        if ".gguf" in gguf_filename.lower():
-            if "gguf-" in gguf_filename.lower() or "gguf." in gguf_filename.lower():
-                sep = "-" if "gguf-" in gguf_filename.lower() else "."
-                pattern = f"{prefix}.gguf{sep}*-of-{total_parts}"
-            else:
-                sep = gguf_filename[m.start(2)-1]
-                pattern = f"{prefix}{sep}*-of-{total_parts}.gguf"
-        else:
-            pattern = f"{prefix}-*-of-{total_parts}"
-        allow_patterns = [pattern]
-    else:
-        allow_patterns = [gguf_filename]
-
-    snapshot_download(
-        repo_id=repo_id,
-        allow_patterns=allow_patterns,
-        local_dir=path
-    )
-    return os.path.join(path, gguf_filename)

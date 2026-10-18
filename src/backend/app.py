@@ -1,10 +1,8 @@
-import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.backend.api.application import install_api_foundation
-from src.backend.constants import DEFAULT_MODEL_REPO_ID, DEFAULT_MODEL_GGUF_FILE
 from src.backend.database.session import upgrade_database_schema, async_session_maker
 from src.backend.execution.config import ExecutorSettings
 from src.backend.execution.store import RunStore
@@ -18,10 +16,11 @@ from src.backend.indexing.store import IndexingStore
 from src.backend.indexing.worker import IndexingWorker
 from src.backend.uploads.config import UploadSettings
 from src.backend.uploads.storage import remove_orphaned_upload_batches
-from src.backend.routes import conversation_router, models_router
-from src.backend.routes.dependencies import get_model_manager, get_ai
-from src.backend.services.model_services import ModelService
-from src.backend.ai.llms.huggingface import path as cpp_models_dir
+from src.backend.routes import conversation_router
+from src.backend.routes.dependencies import get_ai
+from src.backend.model_management.config import ModelManagementSettings
+from src.backend.model_management.store import ModelRegistry
+from src.backend.model_management.worker import ModelDownloadWorker
 
 
 @asynccontextmanager
@@ -32,16 +31,17 @@ async def lifespan(app: FastAPI):
         app: Root FastAPI application that exposes worker instances on app.state.
 
     Yields:
-        None after migrations, orphan cleanup, model synchronization and worker
+        None after migrations, orphan cleanup, background worker
         startup. Indexing prepares documents; the run handler generates queued replies.
 
-    Stop indexing, cleanup and run workers when serving ends, including on failure.
-    Migration/worker initialization failures propagate; model sync failures are logged.
+    Stop indexing, cleanup, download and run workers when serving ends, including on failure.
+    Migration/worker initialization failures propagate. Model downloads never block startup.
     """
     executor_settings = ExecutorSettings.from_environment()
     upload_settings = UploadSettings.from_environment()
     indexing_settings = IndexingSettings.from_environment()
     memory_settings = MemorySettings.from_environment()
+    model_settings = ModelManagementSettings.from_environment()
     print()
     print("=" * 60)
     print()
@@ -58,50 +58,6 @@ async def lifespan(app: FastAPI):
         )
     print("[INFO] Database initialized.")
     print()
-
-    # Ensure model directory exists
-    print("[INFO] Ensuring model directory exists...")
-    os.makedirs(cpp_models_dir, exist_ok=True)
-    print("[INFO] Model directory exists.")
-    print()
-
-    # Detect first run by scanning for GGUF models
-    local_ggufs = [f for f in os.listdir(cpp_models_dir) if f.endswith(".gguf")]
-
-    try:
-        async with async_session_maker() as session:
-            manager = get_model_manager()
-            model_service = ModelService(manager=manager, session=session)
-
-            if not local_ggufs:
-                print("[INFO] No GGUF models were found.")
-                print()
-                print("[INFO] Downloading default model...")
-                print()
-                print("[INFO] Repository:")
-                print(DEFAULT_MODEL_REPO_ID)
-                print()
-                print("[INFO] Model:")
-                print(DEFAULT_MODEL_GGUF_FILE)
-                print()
-                print("[INFO] This only happens once.")
-                print()
-                # Block until download completes
-                await manager.download_gguf(DEFAULT_MODEL_REPO_ID, DEFAULT_MODEL_GGUF_FILE)
-                print("[INFO] Default model downloaded successfully.")
-
-                # Synchronize model in database and regenerate llama-swap configuration
-                await model_service.sync_local_models()
-                print("[INFO] Model synchronized.")
-                print("[INFO] Llama-swap configuration updated.")
-                print()
-                print("[INFO] Starting LocalMind...")
-            else:
-                await model_service.sync_local_models()
-                print("[INFO] Successfully synced local models.")
-                print()
-    except Exception as e:
-        print(f"[ERROR] Failed to sync local models at startup: {e}")
 
     # Eagerly initialize heavy singletons so they are ready before the first request
     print("[INFO] Initializing Vector DB")
@@ -130,6 +86,8 @@ async def lifespan(app: FastAPI):
         async_session_maker, vector_index, upload_settings.root
     )
     app.state.indexing_worker = indexer
+    model_worker = ModelDownloadWorker(ModelRegistry(async_session_maker, model_settings))
+    app.state.model_download_worker = model_worker
     await executor.start()
 
     print()
@@ -142,6 +100,7 @@ async def lifespan(app: FastAPI):
     print()
 
     try:
+        await model_worker.start()
         await indexer.start()
         await app.state.document_cleanup_worker.start()
         yield
@@ -152,7 +111,10 @@ async def lifespan(app: FastAPI):
             try:
                 await indexer.stop()
             finally:
-                await executor.stop()
+                try:
+                    await executor.stop()
+                finally:
+                    await model_worker.stop()
     print("[INFO] Shutting down LocalMind backend...")
     print()
     print("=" * 60)
@@ -171,5 +133,4 @@ app.add_middleware(
 )
 
 app.include_router(conversation_router)
-app.include_router(models_router)
 install_api_foundation(app)

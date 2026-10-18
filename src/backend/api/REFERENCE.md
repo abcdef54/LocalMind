@@ -4,7 +4,7 @@ API v1 is mounted as a separate FastAPI application at `/api/v1` so its exceptio
 handlers and OpenAPI contract do not change legacy response bodies.
 
 - Legacy routes and documentation remain at their existing paths, including
-  `/conversation`, `/models`, and `/docs`; `/uploads` and direct `/chat` were removed.
+  `/conversation` and `/docs`; legacy `/models`, `/uploads` and direct `/chat` were removed.
 - V1 documentation: `/api/v1/docs`; schema: `/api/v1/openapi.json`.
 - Conversation CRUD, bounded history, multipart submissions and indexing retry
   endpoints are implemented. BE-10 connects accepted submissions to background inference.
@@ -243,3 +243,17 @@ RUN_INPUT_SUPERSEDED to preserve conversation memory ordering. A lost HTTP model
 stoppage; interrupted slots remain held until independently confirmed stopped.
 Detailed event vocabulary, examples and cancellation semantics:
 [execution reference](../execution/REFERENCE.md#live-run-events-sse-and-lifecycle-be-13--be-14--be-15).
+
+
+## Models and server capabilities (BE-16)
+
+`GET /api/v1/models` and `GET /api/v1/models/{id}` return registry metadata/readiness
+without scanning disk or exposing local paths. Catalog and quants use
+`/api/v1/models/catalog?query=...&limit=20` and `/api/v1/models/quants?repo_id=...`.
+`POST /api/v1/model-downloads` accepts repo_id/gguf_filename and returns 202 immediately.
+GET `/api/v1/model-downloads` restores recent task IDs after refresh; GET its `/{id}`
+reads status/progress. Repeat POST of the same source explicitly retries failures.
+DELETE `/api/v1/models/{id}` returns 202 after recording deletion intent; default
+and active/unconfirmed-run models are protected. `GET /api/v1/capabilities` publishes
+actual server upload limits, reasoning/personality/default settings, ranking bounds,
+context budget and event/download support. See `model_management/REFERENCE.md`.

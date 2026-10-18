@@ -779,7 +779,7 @@ Giả định thiết kế cần xác nhận trong lúc triển khai, không c�
 - Data/lifecycle: `src/backend/database/models.py`, `crud.py`, `services/conversation_services.py`, `services/attachment_services.py`.
 - RAG/tools: `src/backend/ai/langchain/vector_db.py`, `tools.py`.
 - Reasoning: `src/backend/ai/langgraph/graph_builder.py`, `graph_nodes.py`, `graph_configs.py`, `graph_utils.py`.
-- Models: `src/backend/services/model_services.py`, `src/backend/ai/llms/model_manager.py`, `huggingface.py`.
+- Models: `src/backend/model_management/`, `src/backend/api/v1/models.py`, `src/backend/ai/llms/huggingface.py`.
 
 Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi giai đoạn cần cập nhật trạng thái thực hiện và tiêu chí đã kiểm chứng để tránh nhầm đề xuất với tính năng đang chạy.
 
@@ -913,6 +913,18 @@ Tài liệu này không tự triển khai các API/Redis/worker mới. Mỗi gia
 - POST `/retry` với expected_attempt: giữ run/input/settings/file IDs, reset projection, chỉ tăng attempt khi claim tiếp. Câu hỏi cũ đã có lượt user mới hơn bị chặn 409 để không tái dùng summary tương lai. Reject stale/active/completed/unknown-compute hoặc chat có active run khác; files chưa ready chờ indexing, file deleted/indexing active trả 409. Không tự retry inference.
 - Verification: 190 tests pass trên PostgreSQL 18 tạm và Chroma thật với model/embeddings giả; gồm concurrency sequence, atomic projection rollback, candidate completion order, byes/fallback, SSE resume/retention và cancel/retry races. Không dùng DB app hoặc GPU thật.
 - Snapshot/event endpoints kiểm tra live conversation và optional expected conversation_id. Frontend reducer/animation sẽ dùng event backend thật trong đợt UI rework; task này không tạo UI animation.
+
+### BE-16: Model management và capabilities (2026-10-17)
+
+- API models chuyển sang `/api/v1`; bỏ routes/services/model manager cũ. Catalog/quants tái sử dụng metadata helper Hugging Face.
+- Migration 0010 lưu download task theo repo/filename, attempt, revision, byte counts, result model ID/error; registry có status và manifest các phần GGUF. Không đổi dữ liệu registry cũ.
+- POST `/model-downloads` trả 202 ngay; worker poll DB, download subprocess riêng, pin revision và chỉ công bố sau đủ file/size/GGUF header. GET task/list giúp phục hồi sau refresh; POST cùng source retry failed/interrupted, không tự retry.
+- Storage lock dùng chung giữa processes; child kế thừa lock và bị dừng khi parent chết. Shutdown/timeout kill và reap child trước khi nhả lock; task gián đoạn được recovery. Không dùng slot chạy inference.
+- Worker import GGUF local hoàn chỉnh, giữ model missing để frontend biết, chuyển configuring → ready sau khi ghi config. GET models không scan/ghi config, response không có local_path. Ready không khẳng định GPU đã load hoặc model hỗ trợ tools.
+- DELETE model trả 202 deleting; chặn default và active/unconfirmed runs. Worker xóa config → bytes → row, retry cleanup khi lỗi. Send/retry dùng chung transaction lock với quyết định xóa; reject model local chưa ready.
+- GET `/capabilities` công bố limits/options từ server: upload types/count/bytes, reasoning widths, personality/default settings, temperature bounds, K, context, pagination, events và download limits. Không đưa Redis vào task này.
+- Startup không chờ/tự tải default GGUF; client chủ động gửi download task. Khởi tạo embedding hiện tại thuộc phần indexing/vận hành, không bị thay trong BE-16. Chi tiết API/lifecycle: `src/backend/model_management/REFERENCE.md`.
+- Verification: 211 backend tests pass trên PostgreSQL 18 tạm, Chroma thật và download subprocess giả. Bao gồm migration/adoption/downgrade, queue dedup/capacity, source validation/split models, publication/config failure recovery, readonly registry, deletion guards, subprocess timeout/shutdown races và native filesystem lock retention. Chưa tải model từ Hugging Face hoặc chạy GPU thật trong lượt kiểm thử này.
 
 ## 18. Implementation Tasks
 

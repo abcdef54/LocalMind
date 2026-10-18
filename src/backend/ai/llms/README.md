@@ -1,18 +1,15 @@
-# Model files and llama-swap configuration
-
-This directory manages local GGUF model files. Actual inference uses the model client configured by the graph and the external llama-swap server.
+# Hugging Face catalog and model files
 
 ```text
-Legacy /models route → services/model_services.py
+GET /api/v1/models/catalog or /models/quants
         ↓
-LocalMindModelManager (model_manager.py)
-   ├─ Browse / list quants → huggingface.py → Hugging Face metadata
-   ├─ Download → huggingface.py → local cpp_models/ GGUF files
-   └─ Scan / delete → local filesystem
+huggingface.py → search GGUF metadata / group split quantizations
+
+POST /api/v1/model-downloads
         ↓
-ModelService updates installed_models records
+model_management/ → persisted task → background worker → download subprocess
         ↓
-Manager writes llama_swap_config.yaml
+cpp_models/managed/<installation-id>/ → registry + llama-swap config
         ↓
-External llama-swap reads config and serves inference requests
+External llama-swap loads the selected GGUF for inference
 ```

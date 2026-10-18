@@ -2,7 +2,7 @@
 
 LocalMind is an application developed as part of research into scaling test-time compute. The reasoning modes feature in the application (`Medium`, `High`, and `Extra`) implements the findings of this research, allowing the system to allocate additional compute resources at inference time to improve answer accuracy.
 
-While the system is designed to run entirely locally without transmitting data to external servers, an active internet connection is required during the initial startup to download the default model (`Qwen/Qwen2.5-3B-Instruct-GGUF`). Internet access is also required to browse, download, and add new models from Hugging Face.
+While the system is designed to run entirely locally without transmitting data to external servers, internet access is required to browse and download GGUF models from Hugging Face. The backend no longer downloads a default GGUF during startup; use `POST /api/v1/model-downloads` to install one explicitly. Embedding dependencies may still need their initial model download.
 
 ## Video Demo
 
@@ -222,8 +222,7 @@ LocalMind/
 │   │   │   │
 │   │   │   ├── llms/                     # Local model management
 │   │   │   │   ├── __init__.py
-│   │   │   │   ├── huggingface.py        # HF API browsing, quant listing, GGUF downloading
-│   │   │   │   ├── model_manager.py      # Local file scanning, llama-swap config generation
+│   │   │   │   ├── huggingface.py        # HF API browsing and quant listing
 │   │   │   │   └── cpp_models/           # Downloaded GGUF model files
 │   │   │   │
 │   │   │   └── system_prompt/            # Personality prompt templates
@@ -242,14 +241,11 @@ LocalMind/
 │   │   ├── routes/                       # API route handlers
 │   │   │   ├── __init__.py
 │   │   │   ├── conversations.py          # CRUD routes for conversations and messages
-│   │   │   ├── dependencies.py           # FastAPI dependency injection
-│   │   │   ├── models.py                 # Model browsing, downloading, and management routes
-│   │   │   └── uploads.py                # File upload, ingestion, and attachment routes
+│   │   │   └── dependencies.py           # FastAPI dependency injection
 │   │   │
-│   │   └── services/                     # Business logic layer
-│   │       ├── attachment_services.py    # File upload orchestration and vector DB ingestion
-│   │       ├── conversation_services.py  # Chat history, summarization, and message management
-│   │       └── model_services.py         # Model install, sync, deletion, and llama-swap config
+│   │   ├── services/                     # Submission, history, document and run services
+│   │   │   └── conversation_services.py  # Remaining legacy conversation metadata
+│   │   └── model_management/             # Durable downloads, GGUF installs and llama-swap config
 │   │
 │   └── frontend/                         # Vanilla SPA frontend
 │       ├── index.html                    # Entry point HTML

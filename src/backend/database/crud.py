@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from uuid import UUID
 
-from src.backend.database.models import Conversation, Message, Attachment, InstalledModel
+from src.backend.database.models import Conversation, Message, Attachment
 from src.backend.database.exceptions import ConversationNotFound
 
 
@@ -133,80 +133,3 @@ async def get_infomation_source(
         raise ValueError(f"Message {message_id} not found in conversation {conversation_id}.")
 
     return getattr(message, "citations", [])
-
-
-async def create_installed_model(
-    display_name: str,
-    model_name: str,
-    hf_repo: str,
-    gguf_file: str,
-    local_path: str,
-    quantization: str,
-    size_bytes: int,
-    is_default: bool,
-    session: AsyncSession,
-) -> InstalledModel:
-    new_model = InstalledModel(
-        display_name=display_name,
-        model_name=model_name,
-        hf_repo=hf_repo,
-        gguf_file=gguf_file,
-        local_path=local_path,
-        quantization=quantization,
-        size_bytes=size_bytes,
-        is_default=is_default,
-    )
-    try:
-        session.add(new_model)
-        await session.commit()
-        await session.refresh(new_model)
-        return new_model
-    except Exception:
-        await session.rollback()
-        raise
-
-
-async def get_installed_models(session: AsyncSession) -> list[InstalledModel]:
-    stmt = select(InstalledModel).order_by(InstalledModel.installed_at.desc())
-    results = await session.execute(stmt)
-    return list(results.scalars().all())
-
-
-async def get_installed_model(id: UUID, session: AsyncSession) -> InstalledModel | None:
-    id = coerce_uuid(id)
-    stmt = select(InstalledModel).where(InstalledModel.id == id)
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
-
-
-async def delete_installed_model(id: UUID, session: AsyncSession) -> InstalledModel:
-    id = coerce_uuid(id)
-    model = await get_installed_model(id, session)
-    if not model:
-        raise ValueError(f"Installed model with ID {id} not found.")
-    try:
-        await session.delete(model)
-        await session.commit()
-        return model
-    except Exception:
-        await session.rollback()
-        raise
-
-
-async def update_installed_model(
-    id: UUID, update_data: dict, session: AsyncSession
-) -> InstalledModel:
-    id = coerce_uuid(id)
-    model = await get_installed_model(id, session)
-    if not model:
-        raise ValueError(f"Installed model with ID {id} not found.")
-    try:
-        for key, val in update_data.items():
-            if val is not None:
-                setattr(model, key, val)
-        await session.commit()
-        await session.refresh(model)
-        return model
-    except Exception:
-        await session.rollback()
-        raise

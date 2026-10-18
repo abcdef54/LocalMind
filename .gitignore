@@ -140,3 +140,9 @@ update_log.md
 
 .migrations/
 .agent
+# Runtime model downloads, split GGUF parts and worker locks
+*.gguf-[0-9]*
+*.gguf.[0-9]*
+src/backend/ai/llms/cpp_models/.downloads/
+src/backend/ai/llms/cpp_models/managed/
+src/backend/ai/llms/cpp_models/.model-management.lock

@@ -1,10 +1,10 @@
 # Remaining legacy routes
 
-Conversation reads/metadata and model management remain during the frontend overhaul.
+Conversation reads/metadata remain during the frontend overhaul. Model APIs use v1.
 
 ```text
 /conversation → conversations.py → ConversationService → database CRUD
-/models       → models.py → ModelService → model files / registry / llama-swap
+/api/v1/models + /model-downloads → model_management/ → registry / worker / llama-swap
 
 Old POST /chat → removed; cannot bypass executor admission
         ↓

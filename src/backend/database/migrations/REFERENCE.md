@@ -187,3 +187,12 @@ Adds Run.event_sequence/visualization and scoped RunEvent rows keyed by run/sequ
 Old runs keep outcomes and leases with sequence zero; no fake historical events are
 backfilled. New progress and terminal updates commit with their event/projection.
 Downgrade removes replay state only, preserving messages, runs and files.
+
+
+## 0010_model_downloads
+
+Adds durable `model_downloads` tasks with unique repository/filename sources, status,
+attempt, completed-part byte counts, revision, result model ID and safe error.
+Adds installed-model status/revision/file manifests. Existing rows begin configuring;
+the model worker checks files/config before marking them ready or missing.
+Downgrade removes new metadata/tasks while preserving original model rows and files.

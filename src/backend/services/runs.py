@@ -6,6 +6,8 @@ from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, noload
 
+from src.backend.model_management.store import lock_model_registry_and_check_selected_model
+
 from src.backend.api.errors import ApiError
 from src.backend.api.v1.schemas import MessageResponse, CitationResponse
 from src.backend.database.models import (
@@ -195,6 +197,9 @@ async def retry_run(
             raise ApiError(
                 409, "RUN_INPUT_SUPERSEDED", "Retry the latest send or submit a new message"
             )
+        await lock_model_registry_and_check_selected_model(
+            session, run.settings_snapshot["model_name"]
+        )
         files = list(
             (
                 await session.scalars(

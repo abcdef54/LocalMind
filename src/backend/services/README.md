@@ -1,6 +1,6 @@
 # Application services
 
-Services coordinate business rules across records and storage. New submission/history services and remaining legacy conversation/model services coexist.
+Services coordinate business rules across records and storage. New submission/history services and remaining legacy conversation services coexist.
 
 ```text
 New Send → submissions.py → accept_submission()
@@ -23,5 +23,5 @@ Run request → runs.py → snapshot / saved result / cooperative cancel / guard
 Document request → documents.py → scoped list / content / mark as deleted
 Accepted send → execution/handler.py → AI generation outside HTTP
 Legacy /conversation → conversation_services.py → conversation reads/metadata
-Legacy /models → model_services.py → model files + registry/config
+Model API → model_management/ → durable downloads + model files / registry / config
 ```

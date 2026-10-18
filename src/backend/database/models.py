@@ -266,6 +266,15 @@ class InstalledModel(Base):
     """
 
     __tablename__ = "installed_models"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ready', 'missing', 'deleting', 'configuring')",
+            name="ck_installed_models_status",
+        ),
+    )
+    status = Column(String(20), nullable=False, server_default="configuring")
+    source_revision = Column(String(128), nullable=True)
+    files = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # Display in the UI
@@ -433,5 +442,47 @@ class RunEvent(Base):
     type = Column(String(64), nullable=False)
     payload = Column(JSONB, nullable=False)
     created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+
+class ModelDownload(Base):
+    """Save one model source's download task so refresh/restart does not lose its outcome.
+
+    Each source has one row. Repeating POST returns an active/completed task or
+    explicitly requeues a failed/interrupted task. attempt increments on reservation.
+    downloaded_bytes counts completed parts, not guessed HTTP byte progress.
+    model_id is assigned after installation. No answer-generation slot is occupied.
+    """
+
+    __tablename__ = "model_downloads"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "gguf_filename", name="uq_model_download_source"),
+        CheckConstraint(
+            "status IN ('queued', 'downloading', 'registering', 'completed', 'failed', 'interrupted')",
+            name="ck_model_download_status",
+        ),
+        CheckConstraint(
+            "attempt >= 0 AND downloaded_bytes >= 0 AND (total_bytes IS NULL OR total_bytes >= downloaded_bytes)",
+            name="ck_model_download_progress",
+        ),
+        Index("ix_model_download_status_created", "status", "created_at"),
+    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id = Column(String(200), nullable=False)
+    gguf_filename = Column(String(512), nullable=False)
+    status = Column(String(20), nullable=False, server_default="queued")
+    attempt = Column(Integer, nullable=False, server_default="0")
+    downloaded_bytes = Column(BigInteger, nullable=False, server_default="0")
+    total_bytes = Column(BigInteger, nullable=True)
+    source_revision = Column(String(128), nullable=True)
+    model_id = Column(
+        UUID(as_uuid=True), ForeignKey("installed_models.id", ondelete="SET NULL"), nullable=True
+    )
+    error = Column(JSONB, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+    updated_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
